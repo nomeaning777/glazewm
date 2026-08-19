@@ -9,10 +9,10 @@ use wm_common::{
 use wm_platform::NativeWindowWindowsExt;
 #[cfg(target_os = "windows")]
 use wm_platform::{CornerStyle, OpacityValue};
-use wm_platform::{Rect, WindowZOrder};
+use wm_platform::{Rect, TabBarItem, WindowZOrder};
 
 use crate::{
-  models::{Container, WindowContainer},
+  models::{Container, TabbedContainer, WindowContainer},
   traits::{CommonGetters, PositionGetters, WindowGetters},
   user_config::UserConfig,
   wm_state::WmState,
@@ -25,15 +25,42 @@ pub fn platform_sync(
   let focused_container =
     state.focused_container().context("No focused container.")?;
 
+  let has_tabbed_container = state
+    .root_container
+    .descendants()
+    .any(|container| container.is_tabbed());
+
+  let should_redraw = !state.pending_sync.containers_to_redraw().is_empty()
+    || !state.pending_sync.workspaces_to_reorder().is_empty()
+    // A focus change can select another tab without otherwise requiring a
+    // layout redraw (for example, a native tab-bar click).
+    || state.pending_sync.needs_focus_update() && has_tabbed_container;
+
+  // Reveal a newly selected tab before asking the OS to focus its native
+  // window. Hidden or cloaked windows cannot reliably accept focus.
+  let reveal_tab_before_focus = state.pending_sync.needs_focus_update()
+    && focused_container
+      .ancestors()
+      .any(|ancestor| ancestor.is_tabbed());
+
+  if should_redraw && reveal_tab_before_focus {
+    redraw_containers(&focused_container, state, config)?;
+  }
+
   if state.pending_sync.needs_focus_update() {
     sync_focus(&focused_container, state)?;
   }
 
-  if !state.pending_sync.containers_to_redraw().is_empty()
-    || !state.pending_sync.workspaces_to_reorder().is_empty()
-  {
+  if should_redraw && !reveal_tab_before_focus {
     redraw_containers(&focused_container, state, config)?;
   }
+
+  if state.pending_sync.needs_tab_bar_update() {
+    tracing::debug!(
+      "Refreshing native tab bars without redrawing managed windows."
+    );
+  }
+  sync_tab_bars(state)?;
 
   if state.pending_sync.needs_cursor_jump()
     && config.value.general.cursor_jump.enabled
@@ -76,6 +103,113 @@ pub fn platform_sync(
   state.pending_sync.clear();
 
   Ok(())
+}
+
+fn sync_tab_bars(state: &mut WmState) -> anyhow::Result<()> {
+  let tabbed_containers = state
+    .root_container
+    .descendants()
+    .filter_map(|container| container.as_tabbed().cloned())
+    .collect::<Vec<_>>();
+  let attached_ids = tabbed_containers
+    .iter()
+    .map(CommonGetters::id)
+    .collect::<Vec<_>>();
+
+  let stale_ids = state
+    .tab_bars
+    .keys()
+    .filter(|id| !attached_ids.contains(id))
+    .copied()
+    .collect::<Vec<_>>();
+  for stale_id in stale_ids {
+    if let Some(mut bar) = state.tab_bars.remove(&stale_id) {
+      if let Err(err) = bar.close() {
+        tracing::warn!("Failed to close stale tab bar: {err}");
+      }
+    }
+  }
+
+  for tabbed in tabbed_containers {
+    if !state.tab_bars.contains_key(&tabbed.id()) {
+      match state.create_tab_bar(&tabbed) {
+        Ok(bar) => {
+          state.tab_bars.insert(tabbed.id(), bar);
+        }
+        Err(err) => {
+          tracing::warn!("Failed to create tab bar: {err}");
+          continue;
+        }
+      }
+    }
+
+    let workspace = tabbed
+      .workspace()
+      .context("Tabbed container has no workspace.")?;
+    let rect = tabbed.to_rect()?;
+    let bar_rect = Rect::from_xy(
+      rect.x(),
+      rect.y(),
+      rect.width(),
+      tabbed.tab_bar_height().min(rect.height().max(0)),
+    );
+    let items = tab_bar_items(&tabbed);
+
+    let bar = state
+      .tab_bars
+      .get_mut(&tabbed.id())
+      .context("Tab bar was not created.")?;
+    let has_focused_fullscreen = workspace
+      .descendant_focus_order()
+      .next()
+      .and_then(|container| container.as_window_container().ok())
+      .is_some_and(|window| {
+        matches!(window.state(), WindowState::Fullscreen(_))
+      });
+
+    let update_result = if workspace.is_displayed()
+      && !state.is_paused
+      && tabbed.is_active_tab_descendant()
+      && !has_focused_fullscreen
+      && !items.is_empty()
+      && bar_rect.width() > 0
+      && bar_rect.height() > 0
+    {
+      bar.update(&bar_rect, &items)
+    } else {
+      bar.hide()
+    };
+
+    if let Err(err) = update_result {
+      tracing::warn!("Failed to update tab bar: {err}");
+    }
+  }
+
+  Ok(())
+}
+
+fn tab_bar_items(tabbed: &TabbedContainer) -> Vec<TabBarItem> {
+  let active_child_id = tabbed.active_child().map(|child| child.id());
+
+  tabbed
+    .children()
+    .into_iter()
+    .map(|child| {
+      let focused_descendant = child.descendant_focus_order().next();
+      let title_container =
+        focused_descendant.unwrap_or_else(|| child.clone());
+      let title = title_container.as_window_container().map_or_else(
+        |_| "Tab".to_string(),
+        |window| window.native_properties().title,
+      );
+
+      TabBarItem {
+        id: child.id().to_string(),
+        title,
+        is_active: active_child_id == Some(child.id()),
+      }
+    })
+    .collect()
 }
 
 fn sync_focus(
@@ -175,14 +309,53 @@ fn redraw_containers(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  let windows_to_redraw = state.windows_to_redraw();
+  let mut windows_to_redraw = state.windows_to_redraw();
+
+  let tabbed_focus_changed =
+    state.prev_effects_window.as_ref().is_some_and(|previous| {
+      previous.ancestors().any(|ancestor| ancestor.is_tabbed())
+        && previous.id() != focused_container.id()
+    }) || focused_container
+      .ancestors()
+      .any(|ancestor| ancestor.is_tabbed());
+
+  if state.pending_sync.needs_focus_update()
+    || state.pending_sync.needs_focused_effect_update()
+    || tabbed_focus_changed
+  {
+    windows_to_redraw.extend(
+      state
+        .root_container
+        .descendants()
+        .filter(Container::is_tabbed)
+        .flat_map(|tabbed| tabbed.descendants())
+        .filter_map(|container| container.as_window_container().ok()),
+    );
+    windows_to_redraw = windows_to_redraw
+      .into_iter()
+      .unique_by(CommonGetters::id)
+      .collect();
+  }
+
   let windows_to_bring_to_front =
     windows_to_bring_to_front(focused_container, state)?;
+  let visible_tabbed_windows = state
+    .root_container
+    .descendants()
+    .filter(Container::is_tabbed)
+    .flat_map(|tabbed| tabbed.descendants())
+    .filter_map(|container| container.as_window_container().ok())
+    .filter(|window| {
+      window.is_active_tab_descendant()
+        && matches!(window.display_state(), DisplayState::Hidden)
+    })
+    .collect::<Vec<_>>();
 
   let windows_to_update = {
     let mut windows = windows_to_redraw
       .iter()
       .chain(&windows_to_bring_to_front)
+      .chain(&visible_tabbed_windows)
       .unique_by(|window| window.id())
       .collect::<Vec<_>>();
 
@@ -209,9 +382,14 @@ fn redraw_containers(
 
   for window in windows_to_update.iter().rev() {
     let should_bring_to_front = windows_to_bring_to_front.contains(window);
+    let needs_position_update = windows_to_redraw.contains(window)
+      || visible_tabbed_windows.contains(window);
 
     let workspace =
       window.workspace().context("Window has no workspace.")?;
+
+    let should_be_visible =
+      workspace.is_displayed() && window.is_active_tab_descendant();
 
     let monitor = window.monitor().context("No monitor.")?;
     let hide_corner = monitors_by_hide_corner
@@ -234,7 +412,9 @@ fn redraw_containers(
           .next()
           .and_then(|container| container.as_window_container().ok());
 
-        if let Some(focused_descendant) = focused_descendant {
+        if !should_be_visible {
+          WindowZOrder::Normal
+        } else if let Some(focused_descendant) = focused_descendant {
           if window.id() == focused_descendant.id() {
             WindowZOrder::Normal
           } else {
@@ -262,14 +442,14 @@ fn redraw_containers(
 
     // Skip updating the window's position if it only required a z-order
     // change.
-    if !windows_to_redraw.contains(window) {
+    if !needs_position_update {
       continue;
     }
 
     // Transition display state depending on whether window will be
     // shown or hidden.
     window.set_display_state(
-      match (window.display_state(), workspace.is_displayed()) {
+      match (window.display_state(), should_be_visible) {
         (DisplayState::Hidden | DisplayState::Hiding, true) => {
           DisplayState::Showing
         }
@@ -616,4 +796,43 @@ fn apply_transparency_effect(
   };
 
   _ = window.native().set_transparency(transparency);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::models::{SplitContainer, TilingWindow};
+
+  #[test]
+  fn tab_bar_items_use_focused_titles_and_active_child() {
+    let first = TilingWindow::mock().title("First".to_string()).call();
+    let nested = TilingWindow::mock().title("Nested".to_string()).call();
+    let split = SplitContainer::mock()
+      .tiling_containers(vec![nested.into()])
+      .call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into(), split.clone().into()])
+      .call();
+
+    assert_eq!(
+      tab_bar_items(&tabbed),
+      vec![
+        TabBarItem {
+          id: first.id().to_string(),
+          title: "First".to_string(),
+          is_active: true,
+        },
+        TabBarItem {
+          id: split.id().to_string(),
+          title: "Nested".to_string(),
+          is_active: false,
+        },
+      ]
+    );
+
+    tabbed.borrow_child_focus_order_mut().swap(0, 1);
+    let items = tab_bar_items(&tabbed);
+    assert!(!items[0].is_active);
+    assert!(items[1].is_active);
+  }
 }

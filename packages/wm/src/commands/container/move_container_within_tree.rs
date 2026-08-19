@@ -26,9 +26,9 @@ pub fn move_container_within_tree(
   target_index: usize,
   state: &WmState,
 ) -> anyhow::Result<()> {
-  // Create iterator of parent, grandparent, and great-grandparent.
-  let ancestors =
-    container_to_move.ancestors().take(3).collect::<Vec<_>>();
+  // Keep the complete source path because tabbed and split layouts can be
+  // nested to arbitrary depth.
+  let ancestors = container_to_move.ancestors().collect::<Vec<_>>();
 
   // Get lowest common ancestor (LCA) between `container_to_move` and
   // `target_parent`. This could be the `target_parent` itself.

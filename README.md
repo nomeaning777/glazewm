@@ -354,6 +354,31 @@ binding_modes:
         bindings: ["escape", "enter"]
 ```
 
+### Tabbed layout
+
+Use `toggle-tabbed` to group the focused tiling window and its tiling
+siblings into one stack. Only the active tab is shown; every tab shares
+the same content rectangle.
+
+Tabs can be selected with `focus-next-tab` and `focus-previous-tab`, or
+with wrapping horizontal directional focus. Moving a tab left or right
+reorders it; moving past an edge or vertically removes it from the stack.
+New tiling windows opened while a tab is focused are added to that stack.
+
+```yaml
+keybindings:
+  - commands: ["toggle-tabbed"]
+    bindings: ["alt+w"]
+  - commands: ["focus-previous-tab"]
+    bindings: ["alt+shift+page_up"]
+  - commands: ["focus-next-tab"]
+    bindings: ["alt+shift+page_down"]
+```
+
+The IPC tree exposes tabbed containers as `type: "tabbed"`, including the
+active child and tab-bar height. GlazeWM also renders a native clickable
+tab bar using each child window's title.
+
 ## FAQ
 
 **Q: How do I run GlazeWM on startup?**

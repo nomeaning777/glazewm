@@ -7,6 +7,14 @@ pub fn toggle_pause(state: &mut WmState) {
   let is_paused = !state.is_paused;
   state.is_paused = is_paused;
 
+  if is_paused {
+    for bar in state.tab_bars.values_mut() {
+      if let Err(err) = bar.hide() {
+        tracing::warn!("Failed to hide tab bar while pausing: {err}");
+      }
+    }
+  }
+
   // Redraw full container tree on unpause.
   if !is_paused {
     state

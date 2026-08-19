@@ -14,6 +14,7 @@ mod native_window;
 mod platform_event;
 mod platform_impl;
 mod single_instance;
+mod tab_bar;
 mod thread_bound;
 mod window_listener;
 
@@ -31,6 +32,7 @@ pub use mouse_listener::*;
 pub use native_window::*;
 pub use platform_event::*;
 pub use single_instance::*;
+pub use tab_bar::*;
 pub use thread_bound::*;
 pub use window_listener::*;
 // TODO: Avoid exposing `windows` crate types in the public API.

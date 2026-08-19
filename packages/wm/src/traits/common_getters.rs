@@ -115,17 +115,13 @@ pub trait CommonGetters {
 
   /// Children in order of last focus.
   fn child_focus_order(&self) -> Box<dyn Iterator<Item = Container> + '_> {
-    let child_focus_order = self.borrow_child_focus_order();
+    let child_focus_order = self.borrow_child_focus_order().clone();
 
-    Box::new(std::iter::from_fn(move || {
-      for child_id in child_focus_order.iter() {
-        if let Some(child) = self.child_by_id(child_id) {
-          return Some(child);
-        }
-      }
-
-      None
-    }))
+    Box::new(
+      child_focus_order
+        .into_iter()
+        .filter_map(|child_id| self.child_by_id(&child_id)),
+    )
   }
 
   /// Leaf nodes (i.e. windows and workspaces) in order of last focus.
@@ -273,6 +269,28 @@ pub trait CommonGetters {
       .take_while(|ancestor| end_ancestor.as_ref() != Some(ancestor))
       .chain(end_ancestor.clone())
       .all(|ancestor| ancestor.focus_index() == 0)
+  }
+
+  /// Whether this container is in the active subtree of every tabbed
+  /// ancestor.
+  fn is_active_tab_descendant(&self) -> bool {
+    let mut child = self.as_container();
+
+    while let Some(parent) = child.parent() {
+      if let Some(tabbed_parent) = parent.as_tabbed() {
+        let is_active = tabbed_parent
+          .active_child()
+          .is_some_and(|active_child| active_child.id() == child.id());
+
+        if !is_active {
+          return false;
+        }
+      }
+
+      child = parent;
+    }
+
+    true
   }
 }
 

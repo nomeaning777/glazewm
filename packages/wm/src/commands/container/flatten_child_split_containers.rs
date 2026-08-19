@@ -4,8 +4,8 @@ use crate::{
   traits::{CommonGetters, TilingDirectionGetters},
 };
 
-/// Flattens any redundant split containers at the top-level of the given
-/// parent container.
+/// Flattens redundant child layout containers under a direction
+/// container.
 ///
 /// For example:
 /// ```ignore,compile_fail
@@ -16,43 +16,60 @@ use crate::{
 pub fn flatten_child_split_containers(
   parent: &Container,
 ) -> anyhow::Result<()> {
-  if let Ok(parent) = parent.as_direction_container() {
-    // Get children that are either tiling windows or split containers.
-    let tiling_children = parent
-      .children()
-      .into_iter()
-      .filter(|child| child.is_tiling_window() || child.is_split())
-      .collect::<Vec<_>>();
+  let Ok(parent) = parent.as_direction_container() else {
+    return Ok(());
+  };
 
-    if tiling_children.len() == 1 {
-      // Handle case where the parent is a split container and has a
-      // single split container child.
-      if let Some(split_child) = tiling_children[0].as_split() {
+  // Tabbed containers take one slot in a split, so include every tiling
+  // child when deciding whether the parent has a sole layout child.
+  let tiling_children = parent
+    .children()
+    .into_iter()
+    .filter(|child| child.as_tiling_container().is_ok())
+    .collect::<Vec<_>>();
+
+  if tiling_children.len() == 1 {
+    match &tiling_children[0] {
+      Container::Split(split_child) => {
         flatten_split_container(split_child.clone())?;
         parent.set_tiling_direction(parent.tiling_direction().inverse());
       }
-    } else {
-      let split_children = tiling_children
-        .into_iter()
-        .filter_map(|child| child.as_split().cloned())
-        .collect::<Vec<_>>();
+      Container::Tabbed(tabbed_child) if !tabbed_child.has_children() => {
+        super::flatten_empty_tabbed_container(tabbed_child.clone())?;
+      }
+      _ => {}
+    }
 
-      for split_child in split_children.iter().filter(|split_child| {
-        split_child.tiling_direction() == parent.tiling_direction()
-      }) {
-        // Additionally flatten redundant top-level split containers in
-        // the child.
-        if split_child.child_count() == 1 {
-          if let Some(split_grandchild) =
-            split_child.children()[0].as_split()
-          {
-            flatten_split_container(split_grandchild.clone())?;
-          }
-        }
+    return Ok(());
+  }
 
-        flatten_split_container(split_child.clone())?;
+  let split_children = tiling_children
+    .iter()
+    .filter_map(|child| child.as_split().cloned())
+    .collect::<Vec<_>>();
+
+  for split_child in split_children.iter().filter(|split_child| {
+    split_child.tiling_direction() == parent.tiling_direction()
+  }) {
+    // Additionally flatten redundant top-level split containers in the
+    // child.
+    if split_child.child_count() == 1 {
+      if let Some(split_grandchild) = split_child.children()[0].as_split()
+      {
+        flatten_split_container(split_grandchild.clone())?;
       }
     }
+
+    flatten_split_container(split_child.clone())?;
+  }
+
+  for tabbed_child in tiling_children
+    .into_iter()
+    .filter_map(|child| child.as_tabbed().cloned())
+    .filter(|tabbed| !tabbed.has_children())
+    .collect::<Vec<_>>()
+  {
+    super::flatten_empty_tabbed_container(tabbed_child)?;
   }
 
   Ok(())

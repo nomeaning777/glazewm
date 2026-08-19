@@ -235,6 +235,9 @@ pub enum InvokeCommand {
     #[clap(required = true)]
     tiling_direction: TilingDirection,
   },
+  ToggleTabbed,
+  FocusNextTab,
+  FocusPreviousTab,
   WmCycleFocus {
     #[clap(long, default_value_t = false)]
     omit_floating: bool,
@@ -260,6 +263,26 @@ pub enum InvokeCommand {
   WmRedraw,
   WmReloadConfig,
   WmTogglePause,
+}
+
+#[cfg(test)]
+mod tests {
+  use clap::Parser;
+
+  use super::*;
+
+  #[test]
+  fn parses_tab_commands() {
+    let parse =
+      |command| InvokeCommand::try_parse_from(["", command]).unwrap();
+
+    assert_eq!(parse("toggle-tabbed"), InvokeCommand::ToggleTabbed);
+    assert_eq!(parse("focus-next-tab"), InvokeCommand::FocusNextTab);
+    assert_eq!(
+      parse("focus-previous-tab"),
+      InvokeCommand::FocusPreviousTab
+    );
+  }
 }
 
 impl<'de> Deserialize<'de> for InvokeCommand {

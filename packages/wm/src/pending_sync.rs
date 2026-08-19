@@ -30,6 +30,13 @@ pub struct PendingSync {
   /// Whether to jump the cursor to the focused container (if enabled in
   /// user config).
   needs_cursor_jump: bool,
+
+  /// Whether native tab bars should be refreshed.
+  ///
+  /// This is separate from a container redraw because tab metadata (such
+  /// as a window title) can change without requiring managed windows to
+  /// be repositioned.
+  needs_tab_bar_update: bool,
 }
 
 impl PendingSync {
@@ -40,6 +47,7 @@ impl PendingSync {
       || self.needs_focused_effect_update
       || self.needs_all_effects_update
       || self.needs_cursor_jump
+      || self.needs_tab_bar_update
   }
 
   pub fn clear(&mut self) -> &mut Self {
@@ -49,6 +57,7 @@ impl PendingSync {
     self.needs_focused_effect_update = false;
     self.needs_all_effects_update = false;
     self.needs_cursor_jump = false;
+    self.needs_tab_bar_update = false;
     self
   }
 
@@ -116,6 +125,11 @@ impl PendingSync {
     self
   }
 
+  pub fn queue_tab_bar_update(&mut self) -> &mut Self {
+    self.needs_tab_bar_update = true;
+    self
+  }
+
   pub fn needs_focus_update(&self) -> bool {
     self.needs_focus_update
   }
@@ -132,11 +146,36 @@ impl PendingSync {
     self.needs_cursor_jump
   }
 
+  pub fn needs_tab_bar_update(&self) -> bool {
+    self.needs_tab_bar_update
+  }
+
   pub fn containers_to_redraw(&self) -> &HashMap<Uuid, Container> {
     &self.containers_to_redraw
   }
 
   pub fn workspaces_to_reorder(&self) -> &Vec<Workspace> {
     &self.workspaces_to_reorder
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn tab_bar_update_does_not_queue_container_redraw() {
+    let mut pending_sync = PendingSync::default();
+
+    pending_sync.queue_tab_bar_update();
+
+    assert!(pending_sync.has_changes());
+    assert!(pending_sync.needs_tab_bar_update());
+    assert!(pending_sync.containers_to_redraw().is_empty());
+
+    pending_sync.clear();
+
+    assert!(!pending_sync.has_changes());
+    assert!(!pending_sync.needs_tab_bar_update());
   }
 }

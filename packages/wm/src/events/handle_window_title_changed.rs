@@ -3,8 +3,10 @@ use wm_common::{try_warn, WindowRuleEvent};
 use wm_platform::NativeWindow;
 
 use crate::{
-  commands::window::run_window_rules, traits::WindowGetters,
-  user_config::UserConfig, wm_state::WmState,
+  commands::window::run_window_rules,
+  traits::{CommonGetters, WindowGetters},
+  user_config::UserConfig,
+  wm_state::WmState,
 };
 
 pub fn handle_window_title_changed(
@@ -22,6 +24,19 @@ pub fn handle_window_title_changed(
     window.update_native_properties(|properties| {
       properties.title = title;
     });
+
+    if let Some(tabbed_parent) =
+      window.ancestors().find(crate::models::Container::is_tabbed)
+    {
+      // A title change only affects tab metadata. Redrawing the parent
+      // would unnecessarily reposition and show/hide every window in the
+      // tabbed stack.
+      tracing::debug!(
+        "Queueing tab bar update for title change in container {}.",
+        tabbed_parent.id()
+      );
+      state.pending_sync.queue_tab_bar_update();
+    }
 
     // Run window rules for title change events.
     run_window_rules(

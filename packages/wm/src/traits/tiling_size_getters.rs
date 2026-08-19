@@ -46,6 +46,12 @@ pub trait TilingSizeGetters: CommonGetters {
     &self,
     is_width_resize: bool,
   ) -> anyhow::Result<Option<TilingContainer>> {
+    if let Some(tabbed_parent) =
+      self.parent().and_then(|parent| parent.as_tabbed().cloned())
+    {
+      return tabbed_parent.container_to_resize(is_width_resize);
+    }
+
     let parent = self.direction_container().context("No parent.")?;
 
     let tiling_direction = parent.tiling_direction();
@@ -62,21 +68,30 @@ pub trait TilingSizeGetters: CommonGetters {
         DirectionContainer::Split(parent) => Some(parent.into()),
         DirectionContainer::Workspace(_) => None,
       }
+    } else if self.tiling_siblings().count() > 0 {
+      // Window can only be resized if it has siblings.
+      Some(self.as_tiling_container()?)
     } else {
       let grandparent = parent.parent().context("No grandparent.")?;
 
-      if self.tiling_siblings().count() > 0 {
-        // Window can only be resized if it has siblings.
-        Some(self.as_tiling_container()?)
-      } else {
-        // Resize grandparent in layouts like H[1 V[2 H[3]]], where
-        // container 3 is resized horizontally.
-        match grandparent {
-          Container::Split(grandparent) => Some(grandparent.into()),
-          _ => None,
+      // Resize grandparent in layouts like H[1 V[2 H[3]]], where
+      // container 3 is resized horizontally.
+      match grandparent {
+        Container::Split(grandparent) => Some(grandparent.into()),
+        Container::Tabbed(grandparent) => {
+          return grandparent.container_to_resize(is_width_resize);
         }
+        _ => None,
       }
     };
+
+    if let Some(tabbed_parent) = container_to_resize
+      .as_ref()
+      .and_then(CommonGetters::parent)
+      .and_then(|parent| parent.as_tabbed().cloned())
+    {
+      return tabbed_parent.container_to_resize(is_width_resize);
+    }
 
     Ok(container_to_resize)
   }
@@ -107,4 +122,36 @@ macro_rules! impl_tiling_size_getters {
       }
     }
   };
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::models::{
+    SplitContainer, TabbedContainer, TilingWindow, Workspace,
+  };
+
+  #[test]
+  fn resize_inside_split_tab_targets_outer_tab_slot() {
+    for split_direction in
+      [TilingDirection::Horizontal, TilingDirection::Vertical]
+    {
+      let window = TilingWindow::mock().call();
+      let split = SplitContainer::mock()
+        .tiling_direction(split_direction)
+        .tiling_containers(vec![window.clone().into()])
+        .call();
+      let tabbed = TabbedContainer::mock()
+        .tiling_containers(vec![split.into()])
+        .call();
+      let sibling = TilingWindow::mock().call();
+      let _workspace = Workspace::mock()
+        .tiling_direction(TilingDirection::Horizontal)
+        .tiling_containers(vec![tabbed.clone().into(), sibling.into()])
+        .call();
+
+      let target = window.container_to_resize(true).unwrap().unwrap();
+      assert_eq!(target.id(), tabbed.id());
+    }
+  }
 }

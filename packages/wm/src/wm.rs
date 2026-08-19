@@ -17,8 +17,8 @@ use wm_platform::{
 use crate::{
   commands::{
     container::{
-      focus_container_by_id, focus_in_direction, set_tiling_direction,
-      toggle_tiling_direction,
+      focus_container_by_id, focus_in_direction, focus_tab,
+      set_tiling_direction, toggle_tabbed, toggle_tiling_direction,
     },
     general::{
       cycle_focus, disable_binding_mode, enable_binding_mode,
@@ -180,6 +180,45 @@ impl WindowManager {
     }
 
     Ok(new_subject_container_id)
+  }
+
+  /// Focuses a tab selected from a native tab bar.
+  pub fn process_tab_click(
+    &mut self,
+    tabbed_id: Uuid,
+    container_id: Uuid,
+    config: &mut UserConfig,
+  ) -> anyhow::Result<()> {
+    let valid_target = !self.state.is_paused
+      && self
+        .state
+        .container_by_id(tabbed_id)
+        .and_then(|container| container.as_tabbed().cloned())
+        .is_some_and(|tabbed| {
+          tabbed.is_active_tab_descendant()
+            && tabbed
+              .workspace()
+              .is_some_and(|workspace| workspace.is_displayed())
+            && tabbed
+              .children()
+              .iter()
+              .any(|child| child.id() == container_id)
+        });
+
+    if !valid_target {
+      tracing::debug!(
+        "Ignoring stale tab click for {container_id} in {tabbed_id}."
+      );
+      return Ok(());
+    }
+
+    focus_container_by_id(&container_id, &mut self.state)?;
+
+    if self.state.pending_sync.has_changes() {
+      platform_sync(&mut self.state, config)?;
+    }
+
+    Ok(())
   }
 
   pub fn run_commands(
@@ -743,6 +782,15 @@ impl WindowManager {
           tiling_direction,
         )
       }
+      InvokeCommand::ToggleTabbed => {
+        toggle_tabbed(&subject_container, state, config)
+      }
+      InvokeCommand::FocusNextTab => {
+        focus_tab(&subject_container, true, state)
+      }
+      InvokeCommand::FocusPreviousTab => {
+        focus_tab(&subject_container, false, state)
+      }
       InvokeCommand::WmCycleFocus {
         omit_floating,
         omit_fullscreen,
@@ -799,6 +847,13 @@ impl WindowManager {
     ) {
       tracing::warn!("Failed to run shutdown commands: {:?}", err);
     }
+
+    for bar in self.state.tab_bars.values_mut() {
+      if let Err(err) = bar.close() {
+        tracing::warn!("Failed to close tab bar: {err}");
+      }
+    }
+    self.state.tab_bars.clear();
 
     // Emit remaining WM events before exiting.
     while let Ok(wm_event) = self.event_rx.try_recv() {

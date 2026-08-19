@@ -40,6 +40,11 @@ pub fn focus_in_direction(
     _ => None,
   };
 
+  // i3 treats tabbed containers as horizontally oriented. If no target
+  // exists outside the stack, wrap to the opposite tab.
+  let focus_target = focus_target
+    .or_else(|| tabbed_wrap_target(origin_container, direction));
+
   // Set focus to the target container.
   if let Some(focus_target) = focus_target {
     set_focused_descendant(&focus_target, None);
@@ -47,6 +52,59 @@ pub fn focus_in_direction(
   }
 
   Ok(())
+}
+
+/// Gets an adjacent direct tab when moving horizontally.
+fn tabbed_focus_target(
+  tab: &Container,
+  direction: &Direction,
+) -> Option<Container> {
+  if !matches!(direction, Direction::Left | Direction::Right) {
+    return None;
+  }
+
+  if !tab.parent().is_some_and(|parent| parent.is_tabbed()) {
+    return None;
+  }
+  let target = match direction {
+    Direction::Left => tab.prev_siblings().next(),
+    Direction::Right => tab.next_siblings().next(),
+    _ => None,
+  }?;
+
+  Some(focused_leaf_or_self(target))
+}
+
+/// Wraps focus within the innermost tabbed container.
+fn tabbed_wrap_target(
+  origin_container: &Container,
+  direction: &Direction,
+) -> Option<Container> {
+  if !matches!(direction, Direction::Left | Direction::Right) {
+    return None;
+  }
+
+  let tabbed_parent = origin_container
+    .ancestors()
+    .find_map(|ancestor| ancestor.as_tabbed().cloned())?;
+  let children = tabbed_parent.children();
+
+  if children.len() < 2 {
+    return None;
+  }
+
+  let target = match direction {
+    Direction::Left => children.back().cloned(),
+    Direction::Right => children.front().cloned(),
+    _ => None,
+  }?;
+
+  Some(focused_leaf_or_self(target))
+}
+
+fn focused_leaf_or_self(container: Container) -> Container {
+  let focused_descendant = container.descendant_focus_order().next();
+  focused_descendant.unwrap_or(container)
 }
 
 fn floating_focus_target(
@@ -89,10 +147,26 @@ fn tiling_focus_target(
   // Traverse upwards from the focused container. Stop searching when a
   // workspace is encountered.
   while !origin_or_ancestor.is_workspace() {
-    let parent = origin_or_ancestor
-      .parent()
-      .and_then(|parent| parent.as_direction_container().ok())
-      .context("No direction container.")?;
+    let parent_container =
+      origin_or_ancestor.parent().context("No parent.")?;
+
+    // Tabbed containers behave as horizontally oriented at their own
+    // boundary. Inner split siblings have already been checked because
+    // traversal proceeds from the focused leaf outward.
+    let Ok(parent) = parent_container.as_direction_container() else {
+      if parent_container.is_tabbed() {
+        if let Some(target) =
+          tabbed_focus_target(&origin_or_ancestor, direction)
+        {
+          return Ok(Some(target));
+        }
+
+        origin_or_ancestor = parent_container;
+        continue;
+      }
+
+      return Err(anyhow::anyhow!("No direction container."));
+    };
 
     // Skip if the tiling direction doesn't match.
     if parent.tiling_direction() != tiling_direction {
@@ -118,6 +192,9 @@ fn tiling_focus_target(
           TilingContainer::Split(split) => split
             .descendant_in_direction(&direction.inverse())
             .map(Into::into),
+          TilingContainer::Tabbed(tabbed) => {
+            tabbed.active_child().map(focused_leaf_or_self)
+          }
         });
       }
       None => origin_or_ancestor = parent.into(),
@@ -165,4 +242,94 @@ fn workspace_focus_target(
     .or(target_workspace.map(Into::into));
 
   Ok(focus_target)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::models::{TabbedContainer, TilingWindow};
+
+  #[test]
+  fn focuses_adjacent_tabs_horizontally() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let _tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into(), second.clone().into()])
+      .call();
+
+    assert_eq!(
+      tabbed_focus_target(&first.clone().into(), &Direction::Right)
+        .map(|target| target.id()),
+      Some(second.id())
+    );
+    assert_eq!(
+      tabbed_focus_target(&second.clone().into(), &Direction::Left)
+        .map(|target| target.id()),
+      Some(first.id())
+    );
+    assert!(tabbed_focus_target(&first.into(), &Direction::Down).is_none());
+  }
+
+  #[test]
+  fn searches_outer_tabbed_container_at_inner_edge() {
+    let inner_window = TilingWindow::mock().call();
+    let inner = TabbedContainer::mock()
+      .tiling_containers(vec![inner_window.clone().into()])
+      .call();
+    let outer_window = TilingWindow::mock().call();
+    let _outer = TabbedContainer::mock()
+      .tiling_containers(vec![
+        inner.clone().into(),
+        outer_window.clone().into(),
+      ])
+      .call();
+
+    assert_eq!(
+      tiling_focus_target(&inner_window.into(), &Direction::Right)
+        .unwrap()
+        .map(|target| target.id()),
+      Some(outer_window.id())
+    );
+  }
+
+  #[test]
+  fn prefers_split_sibling_inside_active_tab() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let split = crate::models::SplitContainer::mock()
+      .tiling_direction(TilingDirection::Horizontal)
+      .tiling_containers(vec![first.clone().into(), second.clone().into()])
+      .call();
+    let other_tab = TilingWindow::mock().call();
+    let _tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![split.into(), other_tab.into()])
+      .call();
+
+    assert_eq!(
+      tiling_focus_target(&first.into(), &Direction::Right)
+        .unwrap()
+        .map(|target| target.id()),
+      Some(second.id())
+    );
+  }
+
+  #[test]
+  fn wraps_innermost_tabbed_container() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let _tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into(), second.clone().into()])
+      .call();
+
+    assert_eq!(
+      tabbed_wrap_target(&first.clone().into(), &Direction::Left)
+        .map(|target| target.id()),
+      Some(second.id())
+    );
+    assert_eq!(
+      tabbed_wrap_target(&second.into(), &Direction::Right)
+        .map(|target| target.id()),
+      Some(first.id())
+    );
+  }
 }

@@ -16,9 +16,14 @@ macro_rules! impl_position_getters_as_resizable {
   ($struct_name:ident) => {
     impl PositionGetters for $struct_name {
       fn to_rect(&self) -> anyhow::Result<Rect> {
-        let parent = self
-          .parent()
-          .and_then(|parent| parent.as_direction_container().ok())
+        let parent = self.parent().context("Container has no parent.")?;
+
+        if let Some(tabbed_parent) = parent.as_tabbed() {
+          return tabbed_parent.content_rect();
+        }
+
+        let parent = parent
+          .as_direction_container()
           .context("Parent does not have a tiling direction.")?;
 
         let parent_rect = parent.to_rect()?;

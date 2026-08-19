@@ -38,6 +38,40 @@ pub fn attach_container(
 
   // Resize the child and its siblings if it is a tiling container.
   if let Ok(child) = child.as_tiling_container() {
+    if target_parent.is_tabbed() {
+      let tiling_siblings = child.tiling_siblings().collect::<Vec<_>>();
+
+      if tiling_siblings.is_empty() {
+        child.set_tiling_size(1.0);
+        return Ok(());
+      }
+
+      #[allow(clippy::cast_precision_loss)]
+      let target_size = 1.0 / (tiling_siblings.len() + 1) as f32;
+      let sibling_size = tiling_siblings
+        .iter()
+        .map(TilingSizeGetters::tiling_size)
+        .sum::<f32>();
+
+      if sibling_size > 0.0 {
+        for sibling in &tiling_siblings {
+          sibling.set_tiling_size(
+            sibling.tiling_size() / sibling_size * (1.0 - target_size),
+          );
+        }
+      } else {
+        #[allow(clippy::cast_precision_loss)]
+        let sibling_target =
+          (1.0 - target_size) / tiling_siblings.len() as f32;
+        for sibling in &tiling_siblings {
+          sibling.set_tiling_size(sibling_target);
+        }
+      }
+
+      child.set_tiling_size(target_size);
+      return Ok(());
+    }
+
     let tiling_siblings = child.tiling_siblings().collect::<Vec<_>>();
 
     if tiling_siblings.is_empty() {

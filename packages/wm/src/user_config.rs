@@ -83,7 +83,7 @@ impl UserConfig {
       config_path.parent().context("Invalid config path.")?;
 
     fs::create_dir_all(parent_dir).with_context(|| {
-      format!("Unable to create directory {}.", &config_path.display())
+      format!("Unable to create directory {}.", config_path.display())
     })?;
 
     fs::write(config_path, SAMPLE_CONFIG).with_context(|| {
@@ -376,5 +376,40 @@ impl UserConfig {
         true
       }
     })
+  }
+}
+
+#[cfg(test)]
+impl UserConfig {
+  pub fn mock() -> Self {
+    let value = ParsedConfig::default();
+    let window_rules_by_event = Self::window_rules_by_event(&value);
+
+    Self {
+      path: PathBuf::new(),
+      value,
+      value_str: String::new(),
+      window_rules_by_event,
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn sample_config_includes_valid_tab_commands() {
+    let config = serde_yaml::from_str::<ParsedConfig>(SAMPLE_CONFIG)
+      .expect("sample config should parse");
+    let commands = config
+      .keybindings
+      .into_iter()
+      .flat_map(|binding| binding.commands)
+      .collect::<Vec<_>>();
+
+    assert!(commands.contains(&InvokeCommand::ToggleTabbed));
+    assert!(commands.contains(&InvokeCommand::FocusNextTab));
+    assert!(commands.contains(&InvokeCommand::FocusPreviousTab));
   }
 }

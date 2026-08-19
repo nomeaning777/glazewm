@@ -16,8 +16,9 @@ pub fn unmanage_window(
   window: WindowContainer,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
-  // Create iterator of parent, grandparent, and great-grandparent.
-  let ancestors = window.ancestors().take(3).collect::<Vec<_>>();
+  // Keep the complete path because tabbed and split layouts can be nested
+  // to arbitrary depth.
+  let ancestors = window.ancestors().collect::<Vec<_>>();
 
   // Get container to switch focus to after the window has been removed.
   let focus_target = state.focus_target_after_removal(&window.clone());

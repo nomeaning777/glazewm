@@ -13,14 +13,14 @@ use wm_platform::{NativeWindowWindowsExt, OpacityValue};
 
 use crate::{
   commands::{
-    container::set_focused_descendant,
+    container::{flatten_tabbed_container, set_focused_descendant},
     general::platform_sync,
     monitor::{add_monitor, move_bounded_workspaces_to_new_monitor},
     window::{manage_window, unmanage_window},
   },
   models::{
     Container, Monitor, NativeMonitorProperties, RootContainer,
-    WindowContainer, Workspace, WorkspaceTarget,
+    TabbedContainer, WindowContainer, Workspace, WorkspaceTarget,
   },
   pending_sync::PendingSync,
   traits::{CommonGetters, PositionGetters, WindowGetters},
@@ -35,6 +35,15 @@ pub struct WmState {
   pub dispatcher: Dispatcher,
 
   pub pending_sync: PendingSync,
+
+  /// Native bars for currently attached tabbed containers.
+  pub tab_bars: std::collections::HashMap<Uuid, wm_platform::TabBar>,
+
+  /// Receives tab IDs clicked in native tab bars.
+  tab_click_rx: mpsc::UnboundedReceiver<(Uuid, Uuid)>,
+
+  /// Sends tab IDs clicked in native tab bars.
+  tab_click_tx: mpsc::UnboundedSender<(Uuid, Uuid)>,
 
   /// Name of the most recently focused workspace.
   ///
@@ -83,10 +92,15 @@ impl WmState {
     event_tx: mpsc::UnboundedSender<WmEvent>,
     exit_tx: mpsc::UnboundedSender<()>,
   ) -> Self {
+    let (tab_click_tx, tab_click_rx) = mpsc::unbounded_channel();
+
     Self {
       root_container: RootContainer::new(),
       dispatcher,
       pending_sync: PendingSync::default(),
+      tab_bars: std::collections::HashMap::new(),
+      tab_click_rx,
+      tab_click_tx,
       prev_effects_window: None,
       recent_workspace_name: None,
       unmanaged_or_minimized_timestamp: None,
@@ -98,6 +112,36 @@ impl WmState {
       event_tx,
       exit_tx,
     }
+  }
+
+  /// Creates a native tab bar for a tabbed container.
+  pub fn create_tab_bar(
+    &self,
+    tabbed: &TabbedContainer,
+  ) -> anyhow::Result<wm_platform::TabBar> {
+    let tabbed_id = tabbed.id();
+    let tab_click_tx = self.tab_click_tx.clone();
+
+    Ok(wm_platform::TabBar::new(
+      &self.dispatcher,
+      move |child_id| match child_id.parse::<Uuid>() {
+        Ok(child_id) => {
+          if tab_click_tx.send((tabbed_id, child_id)).is_err() {
+            tracing::warn!(
+              "Failed to send tab click for container {tabbed_id}."
+            );
+          }
+        }
+        Err(err) => {
+          tracing::warn!("Invalid tab container ID: {err}");
+        }
+      },
+    )?)
+  }
+
+  /// Waits for the next tab click.
+  pub async fn next_tab_click(&mut self) -> Option<(Uuid, Uuid)> {
+    self.tab_click_rx.recv().await
   }
 
   /// Populates the initial WM state by creating containers for all
@@ -546,7 +590,10 @@ impl WmState {
   /// Gets the currently focused container. This can either be a window or
   /// a workspace without any descendant windows.
   pub fn focused_container(&self) -> Option<Container> {
-    self.root_container.descendant_focus_order().next()
+    self
+      .root_container
+      .descendant_focus_order()
+      .find(CommonGetters::is_active_tab_descendant)
   }
 
   /// Emits a WM event through an MSPC channel.
@@ -591,10 +638,26 @@ impl WmState {
 
     // Get descendant focus order excluding the removed container.
     let workspace = removed_window.workspace()?;
-    let descendant_focus_order = workspace
-      .descendant_focus_order()
-      .filter(|descendant| descendant.id() != removed_window.id())
-      .collect::<Vec<_>>();
+    let descendant_focus_order = removed_window
+      .ancestors()
+      .filter_map(|ancestor| ancestor.as_tabbed().cloned())
+      .find_map(|tabbed| {
+        let order = tabbed
+          .descendant_focus_order()
+          .filter(|descendant| descendant.id() != removed_window.id())
+          .collect::<Vec<_>>();
+
+        (!order.is_empty()).then_some(order)
+      })
+      .unwrap_or_else(|| {
+        workspace
+          .descendant_focus_order()
+          .filter(|descendant| {
+            descendant.id() != removed_window.id()
+              && descendant.is_active_tab_descendant()
+          })
+          .collect::<Vec<_>>()
+      });
 
     // Get focus target that matches the removed window type. This applies
     // for windows that aren't in a minimized state.
@@ -636,6 +699,24 @@ impl WmState {
     origin_container
       .descendants()
       .filter(|descendant| {
+        if !descendant.is_active_tab_descendant() {
+          return false;
+        }
+
+        if descendant.as_tabbed().is_some_and(|tabbed| {
+          tabbed.to_rect().is_ok_and(|rect| {
+            Rect::from_xy(
+              rect.x(),
+              rect.y(),
+              rect.width(),
+              tabbed.tab_bar_height().min(rect.height().max(0)),
+            )
+            .contains_point(point)
+          })
+        }) {
+          return false;
+        }
+
         descendant
           .to_rect()
           .is_ok_and(|rect| rect.contains_point(point))
@@ -683,6 +764,32 @@ impl WmState {
 
 impl Drop for WmState {
   fn drop(&mut self) {
+    // Native tab bars disappear with the WM. Expand tabbed layouts first
+    // so restored windows fill that space and retain their logical split
+    // proportions instead of overlapping below an empty strip.
+    let mut tabbed_containers = self
+      .root_container
+      .descendants()
+      .filter_map(|container| container.as_tabbed().cloned())
+      .collect::<Vec<_>>();
+    tabbed_containers
+      .sort_by_key(|tabbed| std::cmp::Reverse(tabbed.ancestors().count()));
+
+    for tabbed in tabbed_containers {
+      if !tabbed.is_detached() {
+        if let Err(err) = flatten_tabbed_container(tabbed) {
+          warn!("Failed to expand tabbed layout on cleanup: {:?}", err);
+        }
+      }
+    }
+
+    for bar in self.tab_bars.values_mut() {
+      if let Err(err) = bar.close() {
+        warn!("Failed to close tab bar on cleanup: {:?}", err);
+      }
+    }
+    self.tab_bars.clear();
+
     let managed_windows = self.windows();
 
     for window in &managed_windows {
@@ -701,6 +808,7 @@ impl Drop for WmState {
           warn!("Failed to show window: {:?}", err);
         }
 
+        let _ = window.native().set_cloaked(false);
         let _ = window.native().set_taskbar_visibility(true);
         let _ = window.native().set_border_color(None);
         let _ = window
@@ -708,5 +816,115 @@ impl Drop for WmState {
           .set_transparency(&OpacityValue::from_alpha(u8::MAX));
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use tokio::sync::mpsc;
+  use wm_platform::Dispatcher;
+
+  use super::*;
+  use crate::{
+    commands::container::{attach_container, detach_container},
+    models::{Monitor, SplitContainer, TabbedContainer, TilingWindow},
+  };
+
+  fn state_with_monitor(monitor: &Monitor) -> WmState {
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+    let state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+    attach_container(
+      &monitor.clone().into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+    state
+  }
+
+  #[test]
+  fn hit_testing_ignores_inactive_tabs_and_the_tab_bar() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into(), second.clone().into()])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![tabbed.clone().into()])
+      .call();
+    let monitor =
+      Monitor::mock().workspaces(vec![workspace.clone()]).call();
+    let state = state_with_monitor(&monitor);
+
+    let content_point = first.to_rect().unwrap().center_point();
+    let content_hits =
+      state.containers_at_point(&workspace.clone().into(), &content_point);
+    assert!(content_hits
+      .iter()
+      .any(|container| container.id() == first.id()));
+    assert!(!content_hits
+      .iter()
+      .any(|container| container.id() == second.id()));
+
+    let tabbed_rect = tabbed.to_rect().unwrap();
+    let bar_point = Point {
+      x: tabbed_rect.x() + 1,
+      y: tabbed_rect.y() + 1,
+    };
+    let bar_hits =
+      state.containers_at_point(&workspace.into(), &bar_point);
+    assert!(!bar_hits.iter().any(|container| {
+      matches!(
+        container,
+        Container::Tabbed(_) | Container::TilingWindow(_)
+      )
+    }));
+
+    detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn removal_focus_searches_the_nearest_tabbed_ancestor() {
+    let first = TilingWindow::mock().call();
+    let split = SplitContainer::mock()
+      .tiling_containers(vec![first.clone().into()])
+      .call();
+    let second = TilingWindow::mock().call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![split.into(), second.clone().into()])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![tabbed.into()])
+      .call();
+    let monitor = Monitor::mock().workspaces(vec![workspace]).call();
+    let state = state_with_monitor(&monitor);
+
+    let target = state.focus_target_after_removal(&first.clone().into());
+
+    assert_eq!(target.map(|container| container.id()), Some(second.id()));
+    detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn removal_focus_searches_outer_tab_when_inner_tab_becomes_empty() {
+    let first = TilingWindow::mock().call();
+    let inner = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into()])
+      .call();
+    let second = TilingWindow::mock().call();
+    let outer = TabbedContainer::mock()
+      .tiling_containers(vec![inner.into(), second.clone().into()])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![outer.into()])
+      .call();
+    let monitor = Monitor::mock().workspaces(vec![workspace]).call();
+    let state = state_with_monitor(&monitor);
+
+    let target = state.focus_target_after_removal(&first.clone().into());
+
+    assert_eq!(target.map(|container| container.id()), Some(second.id()));
+    detach_container(monitor.into()).unwrap();
   }
 }

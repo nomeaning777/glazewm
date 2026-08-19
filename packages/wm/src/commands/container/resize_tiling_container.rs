@@ -7,6 +7,13 @@ pub fn resize_tiling_container(
   container_to_resize: &TilingContainer,
   target_size: f32,
 ) {
+  if container_to_resize
+    .parent()
+    .is_some_and(|parent| parent.is_tabbed())
+  {
+    return;
+  }
+
   let tiling_siblings =
     container_to_resize.tiling_siblings().collect::<Vec<_>>();
 

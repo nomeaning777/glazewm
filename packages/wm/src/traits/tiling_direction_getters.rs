@@ -21,14 +21,7 @@ pub trait TilingDirectionGetters: CommonGetters {
     direction: &Direction,
   ) -> Option<TilingWindow> {
     let child = self.child_in_direction(direction)?;
-
-    // Traverse further down if the child is a split container.
-    match child {
-      TilingContainer::Split(split_child) => {
-        split_child.descendant_in_direction(direction)
-      }
-      TilingContainer::TilingWindow(window) => Some(window),
-    }
+    descendant_tiling_window(child, direction)
   }
 
   fn child_in_direction(
@@ -49,6 +42,22 @@ pub trait TilingDirectionGetters: CommonGetters {
       Direction::Up | Direction::Left => self.tiling_children().next(),
       _ => self.tiling_children().last(),
     }
+  }
+}
+
+fn descendant_tiling_window(
+  child: TilingContainer,
+  direction: &Direction,
+) -> Option<TilingWindow> {
+  match child {
+    TilingContainer::Split(split_child) => {
+      split_child.descendant_in_direction(direction)
+    }
+    TilingContainer::Tabbed(tabbed_child) => tabbed_child
+      .active_child()
+      .and_then(|child| child.as_tiling_container().ok())
+      .and_then(|child| descendant_tiling_window(child, direction)),
+    TilingContainer::TilingWindow(window) => Some(window),
   }
 }
 

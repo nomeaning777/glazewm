@@ -15,8 +15,9 @@ pub fn ignore_window(
   window: WindowContainer,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
-  // Create iterator of parent, grandparent, and great-grandparent.
-  let ancestors = window.ancestors().take(3).collect::<Vec<_>>();
+  // Keep the complete path because tabbed and split layouts can be nested
+  // to arbitrary depth.
+  let ancestors = window.ancestors().collect::<Vec<_>>();
 
   state.ignored_windows.push(window.native().clone());
   detach_container(window.clone().into())?;

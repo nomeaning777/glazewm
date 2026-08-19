@@ -5,8 +5,9 @@ use wm_platform::{Direction, Rect};
 use crate::{
   commands::container::{
     flatten_child_split_containers, flatten_split_container,
-    move_container_within_tree, resize_tiling_container,
-    set_focused_descendant, wrap_in_split_container,
+    flatten_tabbed_container, move_container_within_tree,
+    resize_tiling_container, set_focused_descendant,
+    wrap_in_split_container,
   },
   models::{
     DirectionContainer, Monitor, NonTilingWindow, SplitContainer,
@@ -54,6 +55,19 @@ fn move_tiling_window(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
+  if let Some(tabbed_parent) = window_to_move
+    .parent()
+    .and_then(|parent| parent.as_tabbed().cloned())
+  {
+    return move_tab_within_or_out_of_container(
+      window_to_move,
+      tabbed_parent,
+      direction,
+      state,
+      config,
+    );
+  }
+
   // Flatten the parent split container if it only contains the window.
   if let Some(split_parent) = window_to_move
     .parent()
@@ -124,6 +138,87 @@ fn move_tiling_window(
       state,
     ),
   }
+}
+
+fn move_tab_within_or_out_of_container(
+  window_to_move: TilingWindow,
+  tabbed_parent: crate::models::TabbedContainer,
+  direction: &Direction,
+  state: &mut WmState,
+  config: &UserConfig,
+) -> anyhow::Result<()> {
+  match direction {
+    Direction::Left if window_to_move.index() > 0 => {
+      move_container_within_tree(
+        &window_to_move.clone().into(),
+        &tabbed_parent.clone().into(),
+        window_to_move.index() - 1,
+        state,
+      )?;
+      state.pending_sync.queue_container_to_redraw(tabbed_parent);
+      return Ok(());
+    }
+    Direction::Right
+      if window_to_move.index() + 1 < tabbed_parent.child_count() =>
+    {
+      move_container_within_tree(
+        &window_to_move.clone().into(),
+        &tabbed_parent.clone().into(),
+        window_to_move.index() + 1,
+        state,
+      )?;
+      state.pending_sync.queue_container_to_redraw(tabbed_parent);
+      return Ok(());
+    }
+    _ => {}
+  }
+
+  // Avoid detaching the target ancestor while pulling the sole child out
+  // of a tabbed layout. Flattening first replaces the tabbed container in
+  // place, after which the normal movement algorithm can safely continue.
+  if tabbed_parent.child_count() == 1 {
+    flatten_tabbed_container(tabbed_parent)?;
+    return move_tiling_window(window_to_move, direction, state, config);
+  }
+
+  let target_parent = tabbed_parent
+    .parent()
+    .context("Tabbed container has no parent.")?;
+  let target_index = match direction {
+    Direction::Left | Direction::Up => tabbed_parent.index(),
+    Direction::Right | Direction::Down => tabbed_parent.index() + 1,
+  };
+
+  move_container_within_tree(
+    &window_to_move.clone().into(),
+    &target_parent.clone(),
+    target_index,
+    state,
+  )?;
+
+  // Tabbed containers have a horizontal orientation. Once a tab has been
+  // pulled out, keep traversing the normal movement algorithm if the next
+  // parent does not match the requested direction. This creates or targets
+  // the appropriate split instead of, for example, treating `move left` as
+  // `move up` under a vertical parent.
+  let should_continue = target_parent
+    .as_tabbed()
+    .is_some_and(|_| matches!(direction, Direction::Up | Direction::Down))
+    || target_parent.as_direction_container().is_ok_and(|parent| {
+      parent.tiling_direction()
+        != TilingDirection::from_direction(direction)
+    });
+
+  if should_continue {
+    return move_tiling_window(window_to_move, direction, state, config);
+  }
+
+  state
+    .pending_sync
+    .queue_container_to_redraw(target_parent)
+    .queue_container_to_redraw(window_to_move);
+
+  Ok(())
 }
 
 /// Gets the next sibling `TilingWindow` or `SplitContainer` in the given
@@ -200,6 +295,28 @@ fn move_to_sibling_container(
           .queue_container_to_redraw(target_parent)
           .queue_containers_to_redraw(parent.tiling_children());
       }
+    }
+    TilingContainer::Tabbed(tabbed) => {
+      let active_child = tabbed
+        .active_child()
+        .context("Tabbed container has no active child.")?;
+
+      let target_index = match direction {
+        Direction::Up | Direction::Left => active_child.index(),
+        Direction::Down | Direction::Right => active_child.index() + 1,
+      };
+
+      move_container_within_tree(
+        &window_to_move.into(),
+        &tabbed.clone().into(),
+        target_index,
+        state,
+      )?;
+
+      state
+        .pending_sync
+        .queue_container_to_redraw(tabbed)
+        .queue_containers_to_redraw(parent.tiling_children());
     }
   }
 
@@ -523,4 +640,195 @@ fn snap_to_monitor_edge(
   };
 
   window_pos.translate_to_coordinates(x, y)
+}
+
+#[cfg(test)]
+mod tests {
+  use tokio::sync::mpsc;
+  use wm_platform::Dispatcher;
+
+  use super::*;
+  use crate::{
+    commands::container::{attach_container, detach_container},
+    models::{TabbedContainer, Workspace},
+    user_config::UserConfig,
+  };
+
+  fn wm_state() -> WmState {
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+    WmState::new(Dispatcher::mock(), event_tx, exit_tx)
+  }
+
+  fn attach_workspace(state: &WmState, workspace: Workspace) -> Monitor {
+    let monitor = Monitor::mock().workspaces(vec![workspace]).call();
+    attach_container(
+      &monitor.clone().into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+    monitor
+  }
+
+  #[test]
+  fn horizontal_move_reorders_tabs() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let third = TilingWindow::mock().call();
+    let tabbed = crate::models::TabbedContainer::mock()
+      .tiling_containers(vec![
+        first.clone().into(),
+        second.clone().into(),
+        third.clone().into(),
+      ])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![tabbed.clone().into()])
+      .call();
+    let mut state = wm_state();
+    let monitor = attach_workspace(&state, workspace);
+    let config = UserConfig::mock();
+
+    move_tiling_window(
+      first.clone(),
+      &Direction::Right,
+      &mut state,
+      &config,
+    )
+    .unwrap();
+
+    assert_eq!(
+      tabbed
+        .children()
+        .iter()
+        .map(CommonGetters::id)
+        .collect::<Vec<_>>(),
+      vec![second.id(), first.id(), third.id()]
+    );
+    assert_eq!(
+      tabbed.active_child().map(|child| child.id()),
+      Some(first.id())
+    );
+
+    detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn moving_inactive_tab_does_not_activate_it() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let third = TilingWindow::mock().call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![
+        first.clone().into(),
+        second.clone().into(),
+        third.clone().into(),
+      ])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![tabbed.clone().into()])
+      .call();
+    let mut state = wm_state();
+    let monitor = attach_workspace(&state, workspace);
+    let config = UserConfig::mock();
+
+    move_tiling_window(
+      second.clone(),
+      &Direction::Right,
+      &mut state,
+      &config,
+    )
+    .unwrap();
+
+    assert_eq!(
+      tabbed
+        .children()
+        .iter()
+        .map(CommonGetters::id)
+        .collect::<Vec<_>>(),
+      vec![first.id(), third.id(), second.id()]
+    );
+    assert_eq!(
+      tabbed.active_child().map(|child| child.id()),
+      Some(first.id())
+    );
+
+    detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn moving_past_tab_edge_pulls_window_out_of_stack() {
+    let first = TilingWindow::mock().call();
+    let second = TilingWindow::mock().call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![first.clone().into(), second.clone().into()])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_direction(TilingDirection::Horizontal)
+      .tiling_containers(vec![tabbed.clone().into()])
+      .call();
+    let mut state = wm_state();
+    let monitor = attach_workspace(&state, workspace.clone());
+    let config = UserConfig::mock();
+
+    move_tiling_window(
+      first.clone(),
+      &Direction::Left,
+      &mut state,
+      &config,
+    )
+    .unwrap();
+
+    assert_eq!(
+      workspace
+        .tiling_children()
+        .map(|child| child.id())
+        .collect::<Vec<_>>(),
+      vec![first.id(), tabbed.id()]
+    );
+    assert_eq!(tabbed.children()[0].id(), second.id());
+
+    detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn moving_singleton_tab_out_keeps_window_attached() {
+    let window = TilingWindow::mock().call();
+    let tabbed = TabbedContainer::mock()
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let split = SplitContainer::mock()
+      .tiling_direction(TilingDirection::Vertical)
+      .tiling_containers(vec![tabbed.clone().into()])
+      .call();
+    let workspace = Workspace::mock()
+      .tiling_direction(TilingDirection::Horizontal)
+      .tiling_containers(vec![split.clone().into()])
+      .call();
+    let mut state = wm_state();
+    let monitor = attach_workspace(&state, workspace.clone());
+    let config = UserConfig::mock();
+
+    move_tiling_window(
+      window.clone(),
+      &Direction::Left,
+      &mut state,
+      &config,
+    )
+    .unwrap();
+
+    assert_eq!(
+      window.workspace().map(|item| item.id()),
+      Some(workspace.id())
+    );
+    assert_eq!(
+      window.parent().map(|item| item.id()),
+      Some(workspace.id())
+    );
+    assert!(tabbed.is_detached());
+    assert!(split.is_detached());
+
+    detach_container(monitor.into()).unwrap();
+  }
 }

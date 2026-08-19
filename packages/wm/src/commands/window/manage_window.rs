@@ -340,6 +340,13 @@ fn insertion_target(
     };
 
     if let Some(sibling) = sibling {
+      if let Some(tabbed_parent) = sibling
+        .parent()
+        .and_then(|parent| parent.as_tabbed().cloned())
+      {
+        return Ok((tabbed_parent.clone().into(), sibling.index() + 1));
+      }
+
       return Ok((
         sibling.parent().context("No parent.")?,
         sibling.index() + 1,

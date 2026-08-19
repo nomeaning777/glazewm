@@ -20,7 +20,7 @@ use tracing_subscriber::{
   fmt::{self, writer::MakeWriterExt},
   layer::SubscriberExt,
 };
-use wm_common::{AppCommand, InvokeCommand, Verbosity, WmEvent};
+use wm_common::{AppCommand, Verbosity, WmEvent};
 #[cfg(target_os = "macos")]
 use wm_platform::DispatcherExtMacOs;
 use wm_platform::{
@@ -214,6 +214,9 @@ async fn start_wm(
         tracing::debug!("Received keyboard event: {:?}", event);
         wm.process_event(PlatformEvent::Keybinding(event), &mut config)
       }
+      Some((tabbed_id, child_id)) = wm.state.next_tab_click() => {
+        wm.process_tab_click(tabbed_id, child_id, &mut config)
+      },
       _ = cleanup_interval.tick() => {
         if wm.state.is_paused {
           Ok(())
@@ -279,7 +282,7 @@ async fn start_wm(
       },
       Some(()) = tray.config_reload_rx.recv() => {
         wm.process_commands(
-          &vec![InvokeCommand::WmReloadConfig],
+          &vec![wm_common::InvokeCommand::WmReloadConfig],
           None,
           &mut config,
         ).map(|_| ())

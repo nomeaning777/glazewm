@@ -6,4 +6,8 @@ pub struct InsertionTarget {
   pub target_index: usize,
   pub prev_tiling_size: f32,
   pub prev_sibling_count: usize,
+
+  /// Where to restore `target_parent` if removing this container caused
+  /// an otherwise empty layout container to be flattened.
+  pub target_parent_restore: Option<Box<InsertionTarget>>,
 }

@@ -221,6 +221,17 @@ keybindings:
   - commands: ['toggle-tiling-direction']
     bindings: ['alt+v']
 
+  # Group tiling siblings into a tabbed stack. Repeating the command
+  # restores the split layout.
+  - commands: ['toggle-tabbed']
+    bindings: ['alt+w']
+
+  # Cycle through tabs in the current tabbed stack.
+  - commands: ['focus-previous-tab']
+    bindings: ['alt+shift+page_up']
+  - commands: ['focus-next-tab']
+    bindings: ['alt+shift+page_down']
+
   # Change focus from tiling windows -> floating -> fullscreen.
   - commands: ['wm-cycle-focus']
     bindings: ['alt+space']

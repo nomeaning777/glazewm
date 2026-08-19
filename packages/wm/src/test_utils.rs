@@ -14,8 +14,8 @@ use crate::{
   commands::container::attach_container,
   models::{
     Monitor, NativeMonitorProperties, NativeWindowProperties,
-    NonTilingWindow, SplitContainer, TilingContainer, TilingWindow,
-    Workspace,
+    NonTilingWindow, SplitContainer, TabbedContainer, TilingContainer,
+    TilingWindow, Workspace,
   },
   traits::TilingSizeGetters,
 };
@@ -185,6 +185,24 @@ impl SplitContainer {
     }
 
     split
+  }
+}
+
+#[bon]
+impl TabbedContainer {
+  #[builder]
+  pub fn mock(
+    #[builder(default = GapsConfig::default())] gaps_config: GapsConfig,
+    #[builder(default = vec![])] tiling_containers: Vec<TilingContainer>,
+  ) -> Self {
+    let tabbed = Self::new(gaps_config);
+
+    for child in tiling_containers {
+      attach_container(&child.into(), &tabbed.clone().into(), None)
+        .unwrap();
+    }
+
+    tabbed
   }
 }
 

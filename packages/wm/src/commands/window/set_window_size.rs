@@ -4,7 +4,7 @@ use wm_platform::{LengthValue, Rect};
 
 use crate::{
   commands::container::resize_tiling_container,
-  models::{NonTilingWindow, TilingWindow, WindowContainer},
+  models::{Container, NonTilingWindow, TilingWindow, WindowContainer},
   traits::{
     CommonGetters, PositionGetters, TilingSizeGetters, WindowGetters,
   },
@@ -76,14 +76,29 @@ fn set_tiling_window_length(
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let parent_length = if is_width_resize {
       parent.to_rect()?.width()
-        - horizontal_gap * window.tiling_siblings().count() as i32
+        - horizontal_gap
+          * container_to_resize.tiling_siblings().count() as i32
     } else {
       parent.to_rect()?.height()
-        - vertical_gap * window.tiling_siblings().count() as i32
+        - vertical_gap
+          * container_to_resize.tiling_siblings().count() as i32
     };
 
-    // Convert the target length to a tiling size.
-    let tiling_size = target_length.to_percentage(parent_length);
+    // A tab bar occupies layout space outside the native window frame.
+    // Add every intervening bar when translating a requested window
+    // height into the size of the ancestor container being resized.
+    let tab_bar_inset = if is_width_resize {
+      0
+    } else {
+      tab_bar_inset_between(window, &container_to_resize)?
+    };
+    let target_container_length = target_length
+      .to_px(parent_length, None)
+      .saturating_add(tab_bar_inset);
+
+    // Convert the target container length to a tiling size.
+    let tiling_size = LengthValue::from_px(target_container_length)
+      .to_percentage(parent_length);
 
     // Skip the resize if the window is already at the target size.
     if container_to_resize.tiling_size() - tiling_size != 0. {
@@ -96,6 +111,28 @@ fn set_tiling_window_length(
   }
 
   Ok(())
+}
+
+fn tab_bar_inset_between(
+  window: &TilingWindow,
+  container_to_resize: &crate::models::TilingContainer,
+) -> anyhow::Result<i32> {
+  let mut current: Container = window.clone().into();
+  let mut inset = 0_i32;
+
+  while current.id() != container_to_resize.id() {
+    let parent = current
+      .parent()
+      .context("Resize target is not an ancestor of the window.")?;
+
+    if let Some(tabbed) = parent.as_tabbed() {
+      inset = inset.saturating_add(tabbed.tab_bar_height());
+    }
+
+    current = parent;
+  }
+
+  Ok(inset)
 }
 
 fn set_floating_window_size(
@@ -150,4 +187,26 @@ fn set_floating_window_size(
   state.pending_sync.queue_container_to_redraw(window.clone());
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::models::TabbedContainer;
+
+  #[test]
+  fn height_resize_includes_nested_tab_bars() {
+    let window = TilingWindow::mock().call();
+    let inner = TabbedContainer::mock()
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let outer = TabbedContainer::mock()
+      .tiling_containers(vec![inner.into()])
+      .call();
+
+    assert_eq!(
+      tab_bar_inset_between(&window, &outer.clone().into()).unwrap(),
+      outer.tab_bar_height() * 2
+    );
+  }
 }
