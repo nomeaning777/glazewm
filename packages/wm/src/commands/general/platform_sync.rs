@@ -198,14 +198,18 @@ fn tab_bar_items(tabbed: &TabbedContainer) -> Vec<TabBarItem> {
       let focused_descendant = child.descendant_focus_order().next();
       let title_container =
         focused_descendant.unwrap_or_else(|| child.clone());
-      let title = title_container.as_window_container().map_or_else(
-        |_| "Tab".to_string(),
-        |window| window.native_properties().title,
-      );
+      let (title, window_id) =
+        title_container.as_window_container().map_or_else(
+          |_| ("Tab".to_string(), None),
+          |window| {
+            (window.native_properties().title, Some(window.native().id()))
+          },
+        );
 
       TabBarItem {
         id: child.id().to_string(),
         title,
+        window_id,
         is_active: active_child_id == Some(child.id()),
       }
     })
@@ -808,7 +812,7 @@ mod tests {
     let first = TilingWindow::mock().title("First".to_string()).call();
     let nested = TilingWindow::mock().title("Nested".to_string()).call();
     let split = SplitContainer::mock()
-      .tiling_containers(vec![nested.into()])
+      .tiling_containers(vec![nested.clone().into()])
       .call();
     let tabbed = TabbedContainer::mock()
       .tiling_containers(vec![first.clone().into(), split.clone().into()])
@@ -820,11 +824,13 @@ mod tests {
         TabBarItem {
           id: first.id().to_string(),
           title: "First".to_string(),
+          window_id: Some(first.native().id()),
           is_active: true,
         },
         TabBarItem {
           id: split.id().to_string(),
           title: "Nested".to_string(),
+          window_id: Some(nested.native().id()),
           is_active: false,
         },
       ]

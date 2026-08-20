@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use windows::{
   core::{w, PCWSTR},
@@ -8,23 +8,26 @@ use windows::{
     },
     Graphics::Gdi::{
       BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-      FillRect, InvalidateRect, SetBkMode, SetTextColor, PAINTSTRUCT,
-      TRANSPARENT,
+      FillRect, InvalidateRect, SetBkMode, SetTextColor, HBRUSH,
+      PAINTSTRUCT, TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::{
-      CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-      GetWindowLongPtrW, IsWindow, RegisterClassW, SetWindowLongPtrW,
-      SetWindowPos, ShowWindow, CREATESTRUCTW, GWLP_USERDATA,
-      HTTRANSPARENT, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-      SW_SHOWNOACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
+      CreateWindowExW, DefWindowProcW, DestroyWindow, DrawIconEx,
+      GetClassLongPtrW, GetClientRect, GetWindowLongPtrW, IsWindow,
+      LoadCursorW, RegisterClassW, SendMessageTimeoutW, SetWindowLongPtrW,
+      SetWindowPos, ShowWindow, CREATESTRUCTW, DI_NORMAL, GCLP_HICON,
+      GCLP_HICONSM, GWLP_USERDATA, HICON, HTTRANSPARENT, ICON_BIG,
+      ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+      SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+      WM_DESTROY, WM_ERASEBKGND, WM_GETICON, WM_MOUSEACTIVATE,
       WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WNDCLASSW,
       WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     },
   },
 };
 
-use crate::{Dispatcher, Rect, TabBarItem, ThreadBound};
+use crate::{Dispatcher, Rect, TabBarItem, ThreadBound, WindowId};
 
 const CLASS_NAME: PCWSTR = w!("GlazeWM.TabBar");
 const WINDOW_TITLE: PCWSTR = w!("GlazeWM Tab Bar");
@@ -32,6 +35,7 @@ const WINDOW_TITLE: PCWSTR = w!("GlazeWM Tab Bar");
 struct TabBarWindow {
   handle: HWND,
   items: Vec<TabBarItem>,
+  icons: HashMap<WindowId, Option<HICON>>,
   on_click: Arc<dyn Fn(String) + Send + Sync>,
   cursor_down_index: Option<usize>,
 }
@@ -64,6 +68,7 @@ impl TabBar {
         let mut window = Box::new(TabBarWindow {
           handle: HWND(0),
           items: Vec::new(),
+          icons: HashMap::new(),
           on_click,
           cursor_down_index: None,
         });
@@ -73,6 +78,7 @@ impl TabBar {
           lpszClassName: CLASS_NAME,
           lpfnWndProc: Some(window_proc),
           hInstance: HINSTANCE(module.0),
+          hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
           ..Default::default()
         };
 
@@ -124,6 +130,17 @@ impl TabBar {
     };
 
     window.with_mut(move |window| {
+      let window_ids = items
+        .iter()
+        .filter_map(|item| item.window_id)
+        .collect::<Vec<_>>();
+      window.icons.retain(|id, _| window_ids.contains(id));
+      for window_id in window_ids {
+        window
+          .icons
+          .entry(window_id)
+          .or_insert_with(|| unsafe { icon_for_window(window_id) });
+      }
       window.items = items;
 
       unsafe {
@@ -260,11 +277,12 @@ unsafe fn paint(window: &TabBarWindow) {
 
   if !window.items.is_empty() {
     let width = (client.right - client.left).max(1);
+    let height = (client.bottom - client.top).max(0);
     let count = i32::try_from(window.items.len()).unwrap_or(i32::MAX);
 
     for (index, item) in window.items.iter().enumerate() {
       let index = i32::try_from(index).unwrap_or(i32::MAX);
-      let mut item_rect = RECT {
+      let item_rect = RECT {
         left: client.left + width * index / count,
         top: client.top,
         right: client.left + width * (index + 1) / count,
@@ -280,8 +298,54 @@ unsafe fn paint(window: &TabBarWindow) {
       FillRect(dc, &raw const item_rect, brush);
       let _ = DeleteObject(brush);
 
-      item_rect.left += 8;
-      item_rect.right -= 8;
+      if index + 1 < count {
+        let separator_width = (height / 24).max(1);
+        let separator_margin = (height / 6).max(2);
+        let separator_rect = RECT {
+          left: item_rect.right - separator_width,
+          top: item_rect.top + separator_margin,
+          right: item_rect.right,
+          bottom: item_rect.bottom - separator_margin,
+        };
+        let separator_brush = CreateSolidBrush(COLORREF(0x0070_7070));
+        FillRect(dc, &raw const separator_rect, separator_brush);
+        let _ = DeleteObject(separator_brush);
+      }
+
+      let horizontal_padding = (height / 3).clamp(6, 12);
+      let mut content_rect = RECT {
+        left: item_rect.left + horizontal_padding,
+        top: item_rect.top,
+        right: item_rect.right - horizontal_padding,
+        bottom: item_rect.bottom,
+      };
+
+      let icon = item
+        .window_id
+        .and_then(|window_id| window.icons.get(&window_id))
+        .copied()
+        .flatten();
+      if let Some(icon) = icon {
+        let icon_size = height * 2 / 3;
+        if icon_size > 0
+          && content_rect.right - content_rect.left >= icon_size
+        {
+          let icon_top = item_rect.top + (height - icon_size) / 2;
+          let _ = DrawIconEx(
+            dc,
+            content_rect.left,
+            icon_top,
+            icon,
+            icon_size,
+            icon_size,
+            0,
+            HBRUSH(0),
+            DI_NORMAL,
+          );
+          content_rect.left += icon_size + (horizontal_padding / 2).max(3);
+        }
+      }
+
       SetBkMode(dc, TRANSPARENT);
       let text_color = if item.is_active {
         COLORREF(0x00FF_FFFF)
@@ -296,7 +360,7 @@ unsafe fn paint(window: &TabBarWindow) {
       DrawTextW(
         dc,
         &mut title[..title_len],
-        &raw mut item_rect,
+        &raw mut content_rect,
         windows::Win32::Graphics::Gdi::DT_LEFT
           | windows::Win32::Graphics::Gdi::DT_VCENTER
           | windows::Win32::Graphics::Gdi::DT_SINGLELINE
@@ -306,4 +370,33 @@ unsafe fn paint(window: &TabBarWindow) {
   }
 
   let _ = EndPaint(window.handle, &raw const paint);
+}
+
+unsafe fn icon_for_window(window_id: WindowId) -> Option<HICON> {
+  let hwnd = HWND(window_id.0);
+  if hwnd.0 == 0 || !IsWindow(hwnd).as_bool() {
+    return None;
+  }
+
+  for icon_type in [ICON_SMALL2, ICON_SMALL, ICON_BIG] {
+    let mut icon = 0;
+    let result = SendMessageTimeoutW(
+      hwnd,
+      WM_GETICON,
+      WPARAM(icon_type as usize),
+      LPARAM(0),
+      SMTO_ABORTIFHUNG | SMTO_BLOCK,
+      50,
+      Some(&raw mut icon),
+    );
+    if result.0 != 0 && icon != 0 {
+      return Some(HICON(icon.cast_signed()));
+    }
+  }
+
+  [GCLP_HICONSM, GCLP_HICON]
+    .into_iter()
+    .map(|index| GetClassLongPtrW(hwnd, index))
+    .find(|icon| *icon != 0)
+    .map(|icon| HICON(icon.cast_signed()))
 }

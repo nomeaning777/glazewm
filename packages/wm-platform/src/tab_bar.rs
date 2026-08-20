@@ -1,10 +1,12 @@
-use crate::{Dispatcher, Rect};
+use crate::{Dispatcher, Rect, WindowId};
 
 /// A single tab displayed in a [`TabBar`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TabBarItem {
   pub id: String,
   pub title: String,
+  /// Native window used to source the tab's application icon.
+  pub window_id: Option<WindowId>,
   pub is_active: bool,
 }
 
