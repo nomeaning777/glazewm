@@ -249,6 +249,30 @@ workspaces:
     keep_alive: false
 ```
 
+### 配置：持久侧边区域
+
+持久侧边区域可在每个显示器的左侧和/或右侧预留独立的平铺空间。
+移动到该区域的窗口会在切换普通工作区时保持显示。侧边区域会遵循
+`gaps.outer_gap`，因此可通过上方或下方间距为 YASB 等状态栏预留空间。
+
+```yaml
+side_areas:
+  # 像素宽度是否随显示器 DPI 缩放。
+  scale_with_dpi: true
+
+  # 支持像素或百分比；使用 `0px` 禁用对应区域。
+  left: "300px"
+  right: "20%"
+
+window_rules:
+  - commands: ["move --side-area left"]
+    match:
+      - window_process: { equals: "YourWidgetApp" }
+```
+
+也可以通过 `move --side-area left|right` 交互式移动窗口。侧边区域采用
+垂直平铺方向，并独立于普通工作区的激活与停用周期。
+
 ### 配置：窗口规则
 
 可以在窗口首次启动时运行命令。这对于添加特定于窗口的行为很有用，比如始终以全屏模式启动窗口或分配到特定工作区。

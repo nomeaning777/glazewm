@@ -5,10 +5,10 @@
 
 use bon::bon;
 use wm_common::{
-  FloatingStateConfig, GapsConfig, TilingDirection, WindowState,
+  FloatingStateConfig, GapsConfig, SideArea, TilingDirection, WindowState,
   WorkspaceConfig,
 };
-use wm_platform::{Display, NativeWindow, Rect, RectDelta};
+use wm_platform::{Display, LengthValue, NativeWindow, Rect, RectDelta};
 
 use crate::{
   commands::container::attach_container,
@@ -262,6 +262,35 @@ impl Workspace {
     };
 
     let workspace = Self::new(config, gaps_config, tiling_direction);
+
+    for child in tiling_containers {
+      attach_container(&child.into(), &workspace.clone().into(), None)
+        .unwrap();
+    }
+
+    for child in non_tiling_windows {
+      attach_container(&child.into(), &workspace.clone().into(), None)
+        .unwrap();
+    }
+
+    workspace
+  }
+}
+
+#[bon]
+impl Workspace {
+  /// Creates a mock persistent side area.
+  #[builder]
+  pub fn mock_side_area(
+    #[builder(default = SideArea::Left)] side: SideArea,
+    #[builder(default = LengthValue::from_px(300))] width: LengthValue,
+    #[builder(default = true)] scale_with_dpi: bool,
+    #[builder(default = GapsConfig::default())] gaps_config: GapsConfig,
+    #[builder(default = vec![])] tiling_containers: Vec<TilingContainer>,
+    #[builder(default = vec![])] non_tiling_windows: Vec<NonTilingWindow>,
+  ) -> Self {
+    let workspace =
+      Self::new_side_area(side, width, scale_with_dpi, gaps_config);
 
     for child in tiling_containers {
       attach_container(&child.into(), &workspace.clone().into(), None)

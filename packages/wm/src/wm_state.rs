@@ -160,7 +160,7 @@ impl WmState {
         NativeMonitorProperties::try_from(&native_display)
       {
         let monitor =
-          add_monitor(native_display, native_properties, self)?;
+          add_monitor(native_display, native_properties, self, config)?;
         move_bounded_workspaces_to_new_monitor(&monitor, self, config)?;
       }
     }
@@ -686,7 +686,16 @@ impl WmState {
 
     non_minimized_focus_target
       .or(descendant_focus_order.first().cloned())
-      .or(Some(workspace.into()))
+      .or_else(|| {
+        if workspace.is_side_area() {
+          workspace
+            .monitor()
+            .and_then(|monitor| monitor.displayed_workspace())
+            .map(Into::into)
+        } else {
+          Some(workspace.into())
+        }
+      })
   }
 
   /// Returns all containers that contain the given point.

@@ -57,6 +57,8 @@ pub fn handle_window_moved_or_resized_end(
       )?;
 
       if is_maximized || should_fullscreen {
+        let effective_maximized =
+          is_maximized && !nearest_monitor.has_side_areas();
         let fullscreen_state = if let WindowState::Fullscreen(
           fullscreen_state,
         ) = window.state()
@@ -74,7 +76,7 @@ pub fn handle_window_moved_or_resized_end(
         let window = update_window_state(
           window.clone().into(),
           WindowState::Fullscreen(FullscreenStateConfig {
-            maximized: is_maximized,
+            maximized: effective_maximized,
             ..fullscreen_state
           }),
           state,
@@ -83,7 +85,7 @@ pub fn handle_window_moved_or_resized_end(
 
         window.set_active_drag(None);
 
-        if is_maximized {
+        if effective_maximized {
           // Dequeue the window from redraw if it's maximized, since the
           // window is already in the correct state.
           state

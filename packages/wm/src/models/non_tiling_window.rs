@@ -137,6 +137,9 @@ impl NonTilingWindow {
       class_name: self.native_properties().class_name,
       process_name: self.native_properties().process_name,
       active_drag: self.active_drag(),
+      side_area: self
+        .workspace()
+        .and_then(|workspace| workspace.side_area()),
     }))
   }
 }
@@ -149,6 +152,16 @@ impl PositionGetters for NonTilingWindow {
   fn to_rect(&self) -> anyhow::Result<Rect> {
     match self.state() {
       WindowState::Fullscreen(_) => {
+        if let Some(workspace) = self.workspace() {
+          if workspace.is_side_area()
+            || workspace
+              .monitor()
+              .is_some_and(|monitor| monitor.has_side_areas())
+          {
+            return workspace.max_workspace_rect();
+          }
+        }
+
         let monitor = self.monitor().context("No monitor.")?;
 
         #[cfg(target_os = "windows")]

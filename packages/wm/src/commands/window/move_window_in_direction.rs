@@ -330,6 +330,10 @@ fn move_to_workspace_in_direction(
 ) -> anyhow::Result<()> {
   let parent = window_to_move.parent().context("No parent.")?;
   let workspace = window_to_move.workspace().context("No workspace.")?;
+  if workspace.is_side_area() {
+    return Ok(());
+  }
+
   let monitor = parent.monitor().context("No monitor.")?;
 
   let target_workspace = state

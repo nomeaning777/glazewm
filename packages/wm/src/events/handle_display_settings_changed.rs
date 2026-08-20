@@ -53,7 +53,7 @@ pub fn handle_display_settings_changed(
   // Pair unmatched displays with unmatched monitors, or add new ones.
   for (display, properties) in unmatched_displays {
     if pending_monitors.is_empty() {
-      let monitor = add_monitor(display, properties, state)?;
+      let monitor = add_monitor(display, properties, state, config)?;
       new_monitors.push(monitor);
     } else {
       let monitor = pending_monitors.remove(0);

@@ -6,7 +6,7 @@ use tracing::Level;
 use uuid::Uuid;
 use wm_platform::{Delta, Direction, LengthValue, OpacityValue};
 
-use crate::TilingDirection;
+use crate::{SideArea, TilingDirection};
 
 const VERSION: &str = env!("VERSION_NUMBER");
 
@@ -283,6 +283,19 @@ mod tests {
       InvokeCommand::FocusPreviousTab
     );
   }
+
+  #[test]
+  fn parses_side_area_move_commands() {
+    for flag in ["--side-area", "--side", "--sidebar"] {
+      let parsed =
+        InvokeCommand::try_parse_from(["", "move", flag, "left"]).unwrap();
+      let InvokeCommand::Move(args) = parsed else {
+        panic!("Expected move command.");
+      };
+
+      assert_eq!(args.side_area, Some(SideArea::Left));
+    }
+  }
 }
 
 impl<'de> Deserialize<'de> for InvokeCommand {
@@ -384,6 +397,10 @@ pub struct InvokeMoveCommand {
   /// Name of workspace to move the window.
   #[clap(long)]
   pub workspace: Option<String>,
+
+  /// Move the window into a persistent side area on its current monitor.
+  #[clap(long, aliases = ["side", "sidebar"])]
+  pub side_area: Option<SideArea>,
 
   #[clap(long)]
   pub next_active_workspace: bool,

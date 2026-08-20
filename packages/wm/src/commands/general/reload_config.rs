@@ -7,7 +7,10 @@ use wm_common::{WindowRuleEvent, WmEvent};
 use wm_platform::NativeWindowWindowsExt;
 
 use crate::{
-  commands::{window::run_window_rules, workspace::sort_workspaces},
+  commands::{
+    monitor::ensure_side_areas, window::run_window_rules,
+    workspace::sort_workspaces,
+  },
   traits::{CommonGetters, TilingSizeGetters, WindowGetters},
   user_config::UserConfig,
   wm::WindowManager,
@@ -26,6 +29,12 @@ pub fn reload_config(
 
   // Re-evaluate user config file and set its values in state.
   config.reload()?;
+
+  // Apply side-area changes before window rules, since a rule can move a
+  // window into an area that was enabled by this reload.
+  for monitor in state.monitors() {
+    ensure_side_areas(&monitor, state, config)?;
+  }
 
   // Re-run window rules on all active windows.
   for window in state.windows() {

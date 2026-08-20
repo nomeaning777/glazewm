@@ -14,12 +14,22 @@ pub fn focus_in_direction(
   direction: &Direction,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
+  let is_in_side_area = origin_container
+    .workspace()
+    .is_some_and(|workspace| workspace.is_side_area());
+
   let focus_target = match origin_container {
     Container::TilingWindow(_) => {
       // If a suitable focus target isn't found in the current workspace,
       // attempt to find a workspace in the given direction.
       tiling_focus_target(origin_container, direction)?.map_or_else(
-        || workspace_focus_target(origin_container, direction, state),
+        || {
+          if is_in_side_area {
+            Ok(None)
+          } else {
+            workspace_focus_target(origin_container, direction, state)
+          }
+        },
         |container| Ok(Some(container)),
       )?
     }

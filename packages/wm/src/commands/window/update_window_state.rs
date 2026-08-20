@@ -24,6 +24,18 @@ pub fn update_window_state(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<WindowContainer> {
+  let target_state = match target_state {
+    WindowState::Fullscreen(mut fullscreen)
+      if window
+        .monitor()
+        .is_some_and(|monitor| monitor.has_side_areas()) =>
+    {
+      fullscreen.maximized = false;
+      WindowState::Fullscreen(fullscreen)
+    }
+    state => state,
+  };
+
   if window.state() == target_state {
     return Ok(window);
   }
@@ -323,7 +335,9 @@ fn restore_tiling_size(
 #[cfg(test)]
 mod tests {
   use tokio::sync::mpsc;
-  use wm_common::{FloatingStateConfig, GapsConfig};
+  use wm_common::{
+    FloatingStateConfig, FullscreenStateConfig, GapsConfig, SideArea,
+  };
   use wm_platform::Dispatcher;
 
   use super::*;
@@ -335,6 +349,7 @@ mod tests {
       Monitor, NonTilingWindow, SplitContainer, TabbedContainer,
       TilingWindow, Workspace,
     },
+    traits::PositionGetters,
   };
 
   fn state_with_workspace(workspace: Workspace) -> (WmState, Monitor) {
@@ -497,5 +512,50 @@ mod tests {
     assert!((sibling.tiling_size() - 0.75).abs() < 1e-5);
 
     detach_container(monitor.into()).unwrap();
+  }
+
+  #[test]
+  fn fullscreen_does_not_native_maximize_with_side_areas() {
+    let window = NonTilingWindow::mock().call();
+    let workspace = Workspace::mock()
+      .non_tiling_windows(vec![window.clone()])
+      .call();
+    let side_area =
+      Workspace::mock_side_area().side(SideArea::Left).call();
+    let monitor = Monitor::mock()
+      .workspaces(vec![workspace, side_area])
+      .call();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+    let mut state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+    attach_container(
+      &monitor.clone().into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+
+    let updated = update_window_state(
+      window.into(),
+      WindowState::Fullscreen(FullscreenStateConfig {
+        maximized: true,
+        shown_on_top: false,
+      }),
+      &mut state,
+      &UserConfig::mock(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+      updated.state(),
+      WindowState::Fullscreen(FullscreenStateConfig {
+        maximized: false,
+        ..
+      })
+    ));
+    assert_eq!(
+      updated.to_rect().unwrap(),
+      updated.workspace().unwrap().max_workspace_rect().unwrap()
+    );
   }
 }

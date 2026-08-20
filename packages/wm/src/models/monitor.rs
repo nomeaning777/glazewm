@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use uuid::Uuid;
-use wm_common::{ContainerDto, MonitorDto};
+use wm_common::{ContainerDto, MonitorDto, SideArea};
 use wm_platform::{Display, Rect};
 
 use crate::{
@@ -69,8 +69,61 @@ impl Monitor {
   pub fn displayed_workspace(&self) -> Option<Workspace> {
     self
       .child_focus_order()
-      .next()
-      .and_then(|child| child.as_workspace().cloned())
+      .filter_map(|child| child.as_workspace().cloned())
+      .find(|workspace| !workspace.is_side_area())
+  }
+
+  /// Gets a persistent side area on this monitor.
+  pub fn side_area(&self, side: SideArea) -> Option<Workspace> {
+    self
+      .children()
+      .into_iter()
+      .filter_map(|container| container.as_workspace().cloned())
+      .find(|workspace| workspace.side_area() == Some(side))
+  }
+
+  /// Whether either persistent side area is enabled on this monitor.
+  pub fn has_side_areas(&self) -> bool {
+    self.side_area(SideArea::Left).is_some()
+      || self.side_area(SideArea::Right).is_some()
+  }
+
+  /// Gets the effective width of a side area without allowing the two
+  /// areas to overlap.
+  pub fn resolved_side_area_width(
+    &self,
+    side: SideArea,
+  ) -> anyhow::Result<i32> {
+    let available_width = self
+      .side_area(SideArea::Left)
+      .or_else(|| self.side_area(SideArea::Right))
+      .map_or_else(
+        || Ok(self.native_properties().working_area.width().max(0)),
+        |area| area.side_area_bounds().map(|rect| rect.width().max(0)),
+      )?;
+    let left = self
+      .side_area(SideArea::Left)
+      .map_or(Ok(0), |area| area.configured_side_area_width())?;
+    let right = self
+      .side_area(SideArea::Right)
+      .map_or(Ok(0), |area| area.configured_side_area_width())?;
+    let total = i64::from(left) + i64::from(right);
+
+    if total <= i64::from(available_width) || total == 0 {
+      return Ok(match side {
+        SideArea::Left => left,
+        SideArea::Right => right,
+      });
+    }
+
+    let scaled_left =
+      i32::try_from(i64::from(left) * i64::from(available_width) / total)
+        .context("Resolved side-area width exceeded i32 bounds.")?;
+
+    Ok(match side {
+      SideArea::Left => scaled_left,
+      SideArea::Right => available_width - scaled_left,
+    })
   }
 
   pub fn workspaces(&self) -> Vec<Workspace> {
@@ -78,6 +131,7 @@ impl Monitor {
       .children()
       .into_iter()
       .filter_map(|container| container.as_workspace().cloned())
+      .filter(|workspace| !workspace.is_side_area())
       .collect()
   }
 

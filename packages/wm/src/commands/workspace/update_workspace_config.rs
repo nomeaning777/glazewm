@@ -13,6 +13,10 @@ pub fn update_workspace_config(
   config: &UserConfig,
   new_config: &InvokeUpdateWorkspaceConfig,
 ) -> anyhow::Result<()> {
+  if workspace.is_side_area() {
+    return Ok(());
+  }
+
   let current_config = workspace.config();
 
   // Validate the workspace name change.

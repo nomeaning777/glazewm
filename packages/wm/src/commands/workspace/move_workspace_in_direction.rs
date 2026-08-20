@@ -1,5 +1,5 @@
 use anyhow::Context;
-use wm_common::WmEvent;
+use wm_common::{SideArea, WmEvent};
 use wm_platform::Direction;
 
 use super::{activate_workspace, deactivate_workspace, sort_workspaces};
@@ -17,6 +17,10 @@ pub fn move_workspace_in_direction(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
+  if workspace.is_side_area() {
+    return Ok(());
+  }
+
   let origin_monitor = workspace.monitor().context("No monitor.")?;
   let target_monitor =
     state.monitor_in_direction(&origin_monitor, direction)?;
@@ -30,7 +34,8 @@ pub fn move_workspace_in_direction(
     move_container_within_tree(
       &workspace.clone().into(),
       &target_monitor.clone().into(),
-      target_monitor.child_count(),
+      target_monitor.child_count()
+        - usize::from(target_monitor.side_area(SideArea::Right).is_some()),
       state,
     )?;
 
@@ -54,7 +59,7 @@ pub fn move_workspace_in_direction(
       .queue_container_to_redraw(workspace.clone())
       .queue_container_to_redraw(displayed_workspace);
 
-    match origin_monitor.child_count() {
+    match origin_monitor.workspaces().len() {
       0 => {
         // Prevent origin monitor from having no workspaces.
         activate_workspace(None, Some(origin_monitor), state, config)?;

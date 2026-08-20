@@ -13,6 +13,8 @@ pub struct ParsedConfig {
   pub gaps: GapsConfig,
   pub general: GeneralConfig,
   pub keybindings: Vec<KeybindingConfig>,
+  #[serde(alias = "padding", alias = "side_padding")]
+  pub side_areas: SideAreasConfig,
   pub window_behavior: WindowBehaviorConfig,
   pub window_effects: WindowEffectsConfig,
   pub window_rules: Vec<WindowRuleConfig>,
@@ -65,6 +67,49 @@ impl Default for GapsConfig {
       single_window_outer_gap: None,
     }
   }
+}
+
+/// Configures monitor-local areas that stay visible across workspace
+/// switches.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, rename_all(serialize = "camelCase"))]
+pub struct SideAreasConfig {
+  /// Whether pixel widths should scale with the monitor DPI.
+  pub scale_with_dpi: bool,
+
+  /// Width reserved at the left edge of every monitor.
+  pub left: LengthValue,
+
+  /// Width reserved at the right edge of every monitor.
+  pub right: LengthValue,
+}
+
+impl Default for SideAreasConfig {
+  fn default() -> Self {
+    Self {
+      scale_with_dpi: true,
+      left: LengthValue::from_px(0),
+      right: LengthValue::from_px(0),
+    }
+  }
+}
+
+/// Identifies one of the persistent side areas on a monitor.
+#[derive(
+  Clone,
+  Copy,
+  Debug,
+  Deserialize,
+  Eq,
+  PartialEq,
+  Serialize,
+  clap::ValueEnum,
+)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "snake_case")]
+pub enum SideArea {
+  Left,
+  Right,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -470,5 +515,34 @@ where
   #[cfg(not(target_os = "macos"))]
   {
     Ok(method)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn side_areas_default_to_disabled() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>("{}").unwrap();
+
+    assert_eq!(parsed.side_areas, SideAreasConfig::default());
+  }
+
+  #[test]
+  fn parses_side_area_lengths_and_legacy_alias() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_padding:
+  scale_with_dpi: false
+  left: 25%
+  right: 320px
+",
+    )
+    .unwrap();
+
+    assert!(!parsed.side_areas.scale_with_dpi);
+    assert_eq!(parsed.side_areas.left.amount, 0.25);
+    assert_eq!(parsed.side_areas.right, LengthValue::from_px(320));
   }
 }

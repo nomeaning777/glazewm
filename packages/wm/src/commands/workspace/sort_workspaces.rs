@@ -12,6 +12,8 @@ pub fn sort_workspaces(
 ) -> anyhow::Result<()> {
   let mut workspaces = monitor.workspaces();
   config.sort_workspaces(&mut workspaces);
+  let offset =
+    usize::from(monitor.side_area(wm_common::SideArea::Left).is_some());
 
   for workspace in &workspaces {
     let target_index = &workspaces
@@ -21,7 +23,7 @@ pub fn sort_workspaces(
 
     monitor
       .borrow_children_mut()
-      .shift_to_index(*target_index, workspace.clone().into());
+      .shift_to_index(offset + *target_index, workspace.clone().into());
   }
 
   Ok(())

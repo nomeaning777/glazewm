@@ -13,13 +13,23 @@ use crate::{
   wm_state::WmState,
 };
 
+#[allow(clippy::too_many_lines)]
 pub fn move_window_to_workspace(
   window: WindowContainer,
   target: WorkspaceTarget,
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  let current_workspace = window.workspace().context("No workspace.")?;
+  let containing_workspace =
+    window.workspace().context("No workspace.")?;
+  let current_workspace = if containing_workspace.is_side_area() {
+    containing_workspace
+      .monitor()
+      .and_then(|monitor| monitor.displayed_workspace())
+      .context("No regular workspace is currently displayed.")?
+  } else {
+    containing_workspace.clone()
+  };
   let current_monitor =
     current_workspace.monitor().context("No monitor.")?;
 
@@ -40,7 +50,7 @@ pub fn move_window_to_workspace(
   }?;
 
   if let Some(target_workspace) = target_workspace {
-    if target_workspace.id() == current_workspace.id() {
+    if target_workspace.id() == containing_workspace.id() {
       return Ok(());
     }
 
@@ -61,7 +71,9 @@ pub fn move_window_to_workspace(
     }
 
     // Update floating placement if the window has to cross monitors.
-    if target_monitor.id() != current_monitor.id() {
+    if target_monitor.id() != current_monitor.id()
+      || containing_workspace.is_side_area()
+    {
       window.set_floating_placement(
         window
           .floating_placement()
@@ -134,7 +146,9 @@ pub fn move_window_to_workspace(
       WindowContainer::TilingWindow(_) => {
         state
           .pending_sync
-          .queue_containers_to_redraw(current_workspace.tiling_children())
+          .queue_containers_to_redraw(
+            containing_workspace.tiling_children(),
+          )
           .queue_containers_to_redraw(target_workspace.tiling_children());
       }
     }

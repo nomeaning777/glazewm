@@ -28,6 +28,14 @@ pub fn focus_workspace(
     .focused_container()
     .and_then(|focused| focused.workspace())
     .context("No workspace is currently focused.")?;
+  let focused_workspace = if focused_workspace.is_side_area() {
+    focused_workspace
+      .monitor()
+      .and_then(|monitor| monitor.displayed_workspace())
+      .context("No regular workspace is currently displayed.")?
+  } else {
+    focused_workspace
+  };
 
   let (target_workspace_name, target_workspace) =
     state.workspace_by_target(&focused_workspace, target, config)?;

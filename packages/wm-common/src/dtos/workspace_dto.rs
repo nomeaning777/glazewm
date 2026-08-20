@@ -2,7 +2,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::ContainerDto;
-use crate::TilingDirection;
+use crate::{SideArea, TilingDirection};
+
+/// Describes the role of a workspace-like region in the container tree.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkspaceKind {
+  /// A regular switchable workspace.
+  #[default]
+  Workspace,
+
+  /// A persistent monitor-local side area.
+  SideArea { side: SideArea },
+}
 
 /// User-friendly representation of a workspace.
 ///
@@ -23,4 +35,6 @@ pub struct WorkspaceDto {
   pub x: i32,
   pub y: i32,
   pub tiling_direction: TilingDirection,
+  #[serde(default)]
+  pub kind: WorkspaceKind,
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wm_platform::{Rect, RectDelta};
 
-use crate::{ActiveDrag, DisplayState, WindowState};
+use crate::{ActiveDrag, DisplayState, SideArea, WindowState};
 
 /// User-friendly representation of a tiling or non-tiling window.
 ///
@@ -29,4 +29,7 @@ pub struct WindowDto {
   pub class_name: String,
   pub process_name: String,
   pub active_drag: Option<ActiveDrag>,
+  /// Side area containing the window, if any.
+  #[serde(default)]
+  pub side_area: Option<SideArea>,
 }

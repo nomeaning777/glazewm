@@ -585,9 +585,15 @@ fn reposition_window(
       // is needed to be able to move and resize it.
       let should_restore = match &window.state() {
         // Need to restore window if transitioning from maximized
-        // fullscreen to non-maximized fullscreen.
+        // fullscreen to non-maximized fullscreen. A monitor with side
+        // areas also cannot use native maximize, since that would cover
+        // the reserved regions.
         WindowState::Fullscreen(fullscreen) => {
-          !fullscreen.maximized && window.native().is_maximized()?
+          (!fullscreen.maximized
+            || window
+              .monitor()
+              .is_some_and(|monitor| monitor.has_side_areas()))
+            && window.native().is_maximized()?
         }
         // No need to restore window if it'll be minimized. Transitioning
         // from maximized to minimized works without having to
@@ -618,6 +624,9 @@ fn reposition_window(
         }
         WindowState::Fullscreen(fullscreen)
           if fullscreen.maximized
+            && !window
+              .monitor()
+              .is_some_and(|monitor| monitor.has_side_areas())
             && window.native().has_window_style(WS_MAXIMIZEBOX) =>
         {
           if !window.native().is_maximized()? {

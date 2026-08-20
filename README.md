@@ -257,6 +257,32 @@ workspaces:
     keep_alive: false
 ```
 
+### Config: Persistent side areas
+
+Persistent side areas reserve independent tiling space on the left and/or
+right of every monitor. Windows moved there remain visible while switching
+regular workspaces on that monitor. Side areas respect `gaps.outer_gap`, so
+top and bottom gaps can reserve space for bars such as YASB.
+
+```yaml
+side_areas:
+  # Whether pixel widths scale with monitor DPI.
+  scale_with_dpi: true
+
+  # Pixel or percentage widths. Use `0px` to disable an area.
+  left: "300px"
+  right: "20%"
+
+window_rules:
+  - commands: ["move --side-area left"]
+    match:
+      - window_process: { equals: "YourWidgetApp" }
+```
+
+Windows can also be moved interactively with
+`move --side-area left|right`. Side areas use a vertical tiling direction
+and are not part of the regular workspace activation/deactivation cycle.
+
 ### Config: Window rules
 
 Commands can be run when a window is first launched. This is useful for adding window-specific behaviors like always starting a window as fullscreen or assigning to a specific workspace.

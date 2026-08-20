@@ -54,6 +54,14 @@ gaps:
     bottom: '20px'
     left: '20px'
 
+# Optional persistent tiling regions on the left and right of every monitor.
+# Windows moved here remain visible while switching regular workspaces.
+# These regions respect `gaps.outer_gap` (including top/bottom bar space).
+side_areas:
+  scale_with_dpi: true
+  left: '0px'
+  right: '0px'
+
 window_effects:
   # Visual effects to apply to the focused window.
   focused_window:
@@ -132,6 +140,11 @@ workspaces:
   - name: '9'
 
 window_rules:
+  # Example: reserve a left side area above and move a widget into it.
+  # - commands: ['move --side-area left']
+  #   match:
+  #     - window_process: { equals: 'YourWidgetApp' }
+
   - commands: ['ignore']
     match:
       # Ignores any Zebar windows.

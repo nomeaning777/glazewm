@@ -62,6 +62,23 @@ pub fn manage_window(
     // already focused.
     state.pending_sync.queue_focus_change();
 
+    // Window rules can move a new window into a persistent side area.
+    // Redraw the main workspace too because its usable bounds depend on
+    // the side area widths.
+    if window
+      .workspace()
+      .is_some_and(|workspace| workspace.is_side_area())
+    {
+      if let Some(displayed_workspace) = window
+        .monitor()
+        .and_then(|monitor| monitor.displayed_workspace())
+      {
+        state
+          .pending_sync
+          .queue_container_to_redraw(displayed_workspace);
+      }
+    }
+
     // Normally, a `PlatformEvent::WindowFocused` event is what triggers
     // focus effects and workspace reordering to be applied. However, when
     // a window is first launched, this event can come before the
