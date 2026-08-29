@@ -1,0 +1,133 @@
+# Fork-local workflow (not present upstream).
+#
+# Builds the Windows installer set (x64 MSI, arm64 MSI, universal EXE) using
+# the existing `resources/scripts/package.ps1` / WiX sources, without
+# requiring the upstream project's Azure Key Vault signing secrets.
+#
+# See `docs/fork-windows-installer.md` for usage and optional signing setup.
+name: Fork Windows installer (unsigned by default)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_number:
+        type: string
+        default: 0.0.0
+        description: Version number to use for the build (e.g. `1.0.0`).
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: dtolnay/rust-toolchain@21dc36fb71dd22e3317045c0c31a3f4249868b17
+        with:
+          targets: ${{ matrix.target }}
+          toolchain: nightly
+
+      - uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3
+        with:
+          shared-key: ${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      # `--workspace` + `--features ui_access` mirrors what
+      # `resources/scripts/package.ps1` itself builds with when it doesn't
+      # find pre-built binaries, so artifacts from this job are a drop-in
+      # replacement for that fallback path.
+      - name: Build for ${{ matrix.target }}
+        env:
+          VERSION_NUMBER: ${{ inputs.version_number }}
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }} --workspace --features ui_access
+
+      - name: Create upload directory
+        shell: bash
+        run: |
+          SOURCE_DIR="target/${{ matrix.target }}/release"
+          UPLOAD_DIR="temp/$SOURCE_DIR"
+          mkdir -p "$UPLOAD_DIR"
+          mv "$SOURCE_DIR"/glazewm{,-cli,-watcher}.exe "$UPLOAD_DIR/"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          if-no-files-found: error
+          name: fork-build-${{ matrix.target }}
+          path: temp
+
+  package-windows:
+    needs: build-windows
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ inputs.version_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fork-build-*
+          merge-multiple: true
+
+      - name: Install WiX and its extensions
+        run: |
+          dotnet tool install --global wix --version 5.0.0
+          wix extension add WixToolset.UI.wixext/5 WixToolset.Util.wixext/5 WixToolset.BootstrapperApplications.wixext/5
+
+      # AzureSignTool is always installed so that `package.ps1` can attempt
+      # signing, but it no-ops into an unsigned build unless every secret
+      # below is configured on this fork (see `SignFiles` in package.ps1).
+      - name: Install AzureSignTool (only used if signing secrets are configured)
+        run: dotnet tool install --global AzureSignTool --version 5.0.0
+
+      # Signing is entirely optional: `package.ps1` skips signing for any
+      # missing secret/variable and produces unsigned installers instead.
+      # GitHub Actions automatically redacts values sourced from `secrets.*`
+      # in logs, so no signing input can leak even when configured.
+      - name: Run packaging script (unsigned unless AZ_* secrets are configured)
+        env:
+          AZ_VAULT_URL: ${{ secrets.AZ_VAULT_URL }}
+          AZ_CERT_NAME: ${{ secrets.AZ_CERT_NAME }}
+          AZ_CLIENT_ID: ${{ secrets.AZ_CLIENT_ID }}
+          AZ_CLIENT_SECRET: ${{ secrets.AZ_CLIENT_SECRET }}
+          AZ_TENANT_ID: ${{ secrets.AZ_TENANT_ID }}
+          RFC3161_TIMESTAMP_URL: ${{ vars.RFC3161_TIMESTAMP_URL }}
+        run: ./resources/scripts/package.ps1 -VersionNumber $env:VERSION
+
+      - name: Verify expected installers were produced
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in installer-x64.msi installer-arm64.msi installer-universal.exe; do
+            if [ ! -f "out/$f" ]; then
+              echo "::error::Missing expected installer out/$f"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-installer-x64-msi
+          if-no-files-found: error
+          path: out/installer-x64.msi
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-installer-arm64-msi
+          if-no-files-found: error
+          path: out/installer-arm64.msi
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-installer-universal-exe
+          if-no-files-found: error
+          path: out/installer-universal.exe

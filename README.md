@@ -1,5 +1,7 @@
 <div align="center">
 
+> This fork adds an unsigned Windows installer build workflow — see [`docs/fork-windows-installer.md`](docs/fork-windows-installer.md).
+
 > V3 is finally out - check out the changelog [here](https://github.com/glzr-io/GlazeWM/releases) 🔥
 
   <br>
