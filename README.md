@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This is an **unofficial, independently maintained fork** of [GlazeWM](https://github.com/glzr-io/glazewm) and is **not affiliated with or supported by** the upstream project. Only **Windows** is supported here; macOS compatibility is untested and not guaranteed. Please **do not report fork-specific problems to the upstream project** — see the [fork maintenance policy](#fork-maintenance-policy) below.
+
 <div align="center">
 
 > This fork adds an unsigned Windows installer build workflow — see [`docs/fork-windows-installer.md`](docs/fork-windows-installer.md).
@@ -66,6 +69,15 @@ scoop install extras/glazewm
 Help fix something that annoys you, or add a feature you've been wanting for a long time! Contributions are very welcome.
 
 Local development and guidelines are available in the [contributing guide](https://github.com/glzr-io/glazewm/blob/main/CONTRIBUTING.md).
+
+## Fork maintenance policy
+
+This repository is maintained as an independent downstream project and is not intended to be merged back into upstream GlazeWM.
+
+- **One-way sync**: changes flow only from [`glzr-io/glazewm`](https://github.com/glzr-io/glazewm) into this repository. This project does not open Issues, PRs, or comments on the upstream repository, nor push anything upstream, for fork-specific work.
+- **Upstream releases**: upstream stable releases are evaluated and incorporated periodically through dedicated sync branches/PRs in this repository, rather than being automatically merged into `main`.
+- **Platform support**: Windows builds and tests are the compatibility requirement for this fork. macOS is unsupported and may break at any time.
+- **Versioning**: fork releases use the scheme `v<upstream-version>-nm.<revision>`; the first intended release is `v3.10.1-nm.1`.
 
 ## Default keybindings
 
