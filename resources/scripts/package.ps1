@@ -31,7 +31,11 @@ function SignFiles() {
   )
 
   foreach ($secret in $secrets) {
-    if (!(Test-Path "env:$secret")) {
+    # `Test-Path env:` only detects an unset variable, but GitHub Actions
+    # always defines secret-backed env vars, just as an empty string when
+    # the underlying secret isn't configured (e.g. on a fork without
+    # upstream's signing secrets). Treat empty the same as unset.
+    if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($secret))) {
       Write-Output "Skipping signing due to missing secret '$secret'."
       Return
     }
