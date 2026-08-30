@@ -38,15 +38,83 @@ jobs:
         with:
           shared-key: ${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
-      # `--workspace` + `--features ui_access` mirrors what
-      # `resources/scripts/package.ps1` itself builds with when it doesn't
-      # find pre-built binaries, so artifacts from this job are a drop-in
-      # replacement for that fallback path.
+      # UIAccess requires the exe to be Authenticode-signed and installed in
+      # a secure location (see `packages/wm/build.rs`). This fork has no
+      # signing secrets configured by default, so only request the
+      # `ui_access` feature here when every signing secret below is present
+      # (mirroring `Test-SigningConfigured` in `package.ps1`) — otherwise the
+      # exe would request a privilege it can't back up and Windows would
+      # refuse to launch it.
+      - name: Determine signing configuration
+        id: signing
+        shell: bash
+        env:
+          AZ_VAULT_URL: ${{ secrets.AZ_VAULT_URL }}
+          AZ_CERT_NAME: ${{ secrets.AZ_CERT_NAME }}
+          AZ_CLIENT_ID: ${{ secrets.AZ_CLIENT_ID }}
+          AZ_CLIENT_SECRET: ${{ secrets.AZ_CLIENT_SECRET }}
+          AZ_TENANT_ID: ${{ secrets.AZ_TENANT_ID }}
+          RFC3161_TIMESTAMP_URL: ${{ vars.RFC3161_TIMESTAMP_URL }}
+        run: |
+          if [[ -n "$AZ_VAULT_URL" && -n "$AZ_CERT_NAME" && -n "$AZ_CLIENT_ID" && -n "$AZ_CLIENT_SECRET" && -n "$AZ_TENANT_ID" && -n "$RFC3161_TIMESTAMP_URL" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `--workspace` mirrors what `resources/scripts/package.ps1` itself
+      # builds with when it doesn't find pre-built binaries, so artifacts
+      # from this job are a drop-in replacement for that fallback path.
       - name: Build for ${{ matrix.target }}
         env:
           VERSION_NUMBER: ${{ inputs.version_number }}
+          SIGNING_CONFIGURED: ${{ steps.signing.outputs.configured }}
         shell: bash
-        run: cargo build --locked --release --target ${{ matrix.target }} --workspace --features ui_access
+        run: |
+          set -eo pipefail
+          if [[ "$SIGNING_CONFIGURED" == "true" ]]; then
+            cargo build --locked --release --target ${{ matrix.target }} --workspace --features ui_access
+          else
+            cargo build --locked --release --target ${{ matrix.target }} --workspace
+          fi
+
+      # Regression check for the failure mode above: a freshly built exe
+      # must actually launch, and an unsigned exe must not request UIAccess.
+      - name: Verify unsigned build launches without requesting UIAccess
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          SIGNING_CONFIGURED: ${{ steps.signing.outputs.configured }}
+        run: |
+          $exe = "target/${{ matrix.target }}/release/glazewm.exe"
+
+          # `glazewm.exe` is built with `windows_subsystem = "windows"` in
+          # release mode, so drive it via `Process` directly rather than the
+          # `&` call operator to get a reliable exit code regardless of
+          # console-attachment quirks for GUI-subsystem executables.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new($exe, "--help")
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          Write-Output "glazewm.exe --help exited with code $($proc.ExitCode)."
+          if ($proc.ExitCode -ne 0) {
+            throw "glazewm.exe --help exited with code $($proc.ExitCode)"
+          }
+
+          if ($env:SIGNING_CONFIGURED -ne "true") {
+            $bytes = [System.IO.File]::ReadAllBytes($exe)
+            $manifestText = [System.Text.Encoding]::UTF8.GetString($bytes)
+            if ($manifestText -notmatch 'uiAccess="false"') {
+              throw 'Expected embedded manifest to declare uiAccess="false" for an unsigned build'
+            }
+
+            $signature = Get-AuthenticodeSignature $exe
+            if ($signature.Status -ne "NotSigned") {
+              throw "Expected glazewm.exe to be unsigned, got status $($signature.Status)"
+            }
+          }
+
+          Write-Output "Verified: glazewm.exe launched successfully (SIGNING_CONFIGURED=$env:SIGNING_CONFIGURED)."
 
       - name: Create upload directory
         shell: bash

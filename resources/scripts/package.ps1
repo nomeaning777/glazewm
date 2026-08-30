@@ -10,17 +10,7 @@ function ExitOnError() {
   }
 }
 
-function SignFiles() {
-  param(
-    [Parameter(Mandatory)]
-    [string[]]$filePaths
-  )
-
-  if (!(Get-Command "azuresigntool" -ErrorAction SilentlyContinue)) {
-    Write-Output "Skipping signing because AzureSignTool is not installed."
-    Return
-  }
-
+function Test-SigningConfigured() {
   $secrets = @(
     "AZ_VAULT_URL",
     "AZ_CERT_NAME",
@@ -36,9 +26,27 @@ function SignFiles() {
     # the underlying secret isn't configured (e.g. on a fork without
     # upstream's signing secrets). Treat empty the same as unset.
     if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($secret))) {
-      Write-Output "Skipping signing due to missing secret '$secret'."
-      Return
+      Return $false
     }
+  }
+
+  Return $true
+}
+
+function SignFiles() {
+  param(
+    [Parameter(Mandatory)]
+    [string[]]$filePaths
+  )
+
+  if (!(Get-Command "azuresigntool" -ErrorAction SilentlyContinue)) {
+    Write-Output "Skipping signing because AzureSignTool is not installed."
+    Return
+  }
+
+  if (!(Test-SigningConfigured)) {
+    Write-Output "Skipping signing because signing secrets are not fully configured."
+    Return
   }
 
   Write-Output "Signing $filePaths."
@@ -92,7 +100,17 @@ function BuildExes() {
     if (($sourcePaths | Where-Object { !(Test-Path $_) }).Count -gt 0) {
       Write-Output "Build artifact not found for target '$target'. Building now..."
 
-      cargo build --locked --release --target $target --features ui_access
+      # UIAccess requires the exe to be Authenticode-signed and installed in
+      # a secure location, so only request it when this build will actually
+      # be signed below; otherwise Windows refuses to launch the exe.
+      $buildArgs = @("build", "--locked", "--release", "--target", $target)
+      if (Test-SigningConfigured) {
+        $buildArgs += @("--features", "ui_access")
+      } else {
+        Write-Output "Signing is not configured; building with UIAccess disabled."
+      }
+
+      cargo @buildArgs
       ExitOnError
 
       Write-Output "Build completed successfully for target '$target'."
