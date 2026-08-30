@@ -88,9 +88,17 @@ jobs:
         run: |
           $exe = "target/${{ matrix.target }}/release/glazewm.exe"
 
-          & $exe --help
-          if ($LASTEXITCODE -ne 0) {
-            throw "glazewm.exe --help exited with code $LASTEXITCODE"
+          # `glazewm.exe` is built with `windows_subsystem = "windows"` in
+          # release mode, so drive it via `Process` directly rather than the
+          # `&` call operator to get a reliable exit code regardless of
+          # console-attachment quirks for GUI-subsystem executables.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new($exe, "--help")
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          Write-Output "glazewm.exe --help exited with code $($proc.ExitCode)."
+          if ($proc.ExitCode -ne 0) {
+            throw "glazewm.exe --help exited with code $($proc.ExitCode)"
           }
 
           if ($env:SIGNING_CONFIGURED -ne "true") {
