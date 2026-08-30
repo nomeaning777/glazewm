@@ -48,6 +48,24 @@ jobs:
         shell: bash
         run: cargo build --locked --release --target ${{ matrix.target }} --workspace --features ui_access
 
+      # UIAccess requires the exe to be Authenticode-signed and installed in
+      # a secure location (see `packages/wm/build.rs`). This fork's unsigned
+      # builds don't meet that requirement, so Windows refuses to launch a
+      # UIAccess exe that isn't trusted. Regression check for that failure
+      # mode: a freshly built exe must actually launch.
+      - name: Verify unsigned build launches
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/glazewm.exe"
+
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "glazewm.exe --help exited with code $LASTEXITCODE"
+          }
+
+          Write-Output "Verified: glazewm.exe launched successfully."
+
       - name: Create upload directory
         shell: bash
         run: |
