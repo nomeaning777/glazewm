@@ -43,6 +43,30 @@ Azure Key Vault certificate — no code changes are required. Values are
 never printed to logs (GitHub redacts anything sourced from `secrets.*`,
 and the script never echoes them).
 
+## Unsigned builds intentionally disable UIAccess
+
+`glazewm.exe` has an optional `ui_access` build feature that requests the
+Windows [UIAccess privilege][uiaccess], which lets it set the foreground
+window and reposition elevated windows. UIAccess only works for an exe
+that is **Authenticode-signed and installed in a secure location** (e.g.
+`C:\Program Files`) — Windows refuses to even launch a UIAccess exe that
+isn't trustworthy, failing with "A referral was returned from the server."
+
+Because this fork has no signing secrets configured by default, both
+`fork-windows-installer.yaml` and `package.ps1`'s build fallback only
+enable the `ui_access` feature when every signing secret above is
+present. An unsigned fork build therefore launches normally, but with one
+functional limitation: **it can't bring elevated windows to the
+foreground or reposition them.** This does not affect non-elevated
+windows. If you configure signing (see above), builds regain UIAccess.
+
+Do not work around the launch failure by disabling UAC, SmartScreen, or
+any other Windows security policy — that weakens your machine's security
+for a problem that's fixed correctly by either not requesting UIAccess
+(the default here) or by actually signing the binary.
+
+[uiaccess]: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/user-account-control-only-elevate-uiaccess-applications-that-are-installed-in-secure-locations
+
 ## Notes
 
 - This workflow only builds/packages Windows targets. It does not touch
