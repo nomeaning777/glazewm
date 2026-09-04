@@ -28,7 +28,8 @@ use crate::{
     window::{
       ignore_window, move_window_in_direction, move_window_to_side_area,
       move_window_to_workspace, resize_window, set_window_position,
-      set_window_size, update_window_state, WindowPositionTarget,
+      set_window_size, update_window_state,
+      workspace_target_from_move_command, WindowPositionTarget,
     },
     workspace::{
       focus_workspace, move_workspace_in_direction,
@@ -385,93 +386,19 @@ impl WindowManager {
                 state,
                 config,
               )?;
-            }
-
-            if let Some(direction) = &args.workspace_in_direction {
+            } else if let Some(target) =
+              workspace_target_from_move_command(args)
+            {
               move_window_to_workspace(
                 window.clone(),
-                WorkspaceTarget::Direction(direction.clone()),
+                target,
                 state,
                 config,
               )?;
-            }
-
-            if let Some(name) = &args.workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::Name(name.clone()),
-                state,
-                config,
-              )?;
-            }
-
-            if let Some(side) = args.side_area {
+            } else if let Some(side) = args.side_area {
               move_window_to_side_area(
                 window.clone(),
                 side,
-                state,
-                config,
-              )?;
-            }
-
-            if args.next_active_workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::NextActive,
-                state,
-                config,
-              )?;
-            }
-
-            if args.prev_active_workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::PreviousActive,
-                state,
-                config,
-              )?;
-            }
-
-            if args.next_workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::Next,
-                state,
-                config,
-              )?;
-            }
-
-            if args.prev_workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::Previous,
-                state,
-                config,
-              )?;
-            }
-
-            if args.recent_workspace {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::Recent,
-                state,
-                config,
-              )?;
-            }
-
-            if args.next_active_workspace_on_monitor {
-              move_window_to_workspace(
-                window.clone(),
-                WorkspaceTarget::NextActiveInMonitor,
-                state,
-                config,
-              )?;
-            }
-
-            if args.prev_active_workspace_on_monitor {
-              move_window_to_workspace(
-                window,
-                WorkspaceTarget::PreviousActiveInMonitor,
                 state,
                 config,
               )?;
