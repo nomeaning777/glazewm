@@ -204,3 +204,64 @@ fn update_window_effects(
 
   Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+  use std::fs;
+
+  use tokio::sync::mpsc;
+  use uuid::Uuid;
+  use wm_common::SideArea;
+  use wm_platform::Dispatcher;
+
+  use super::*;
+  use crate::{
+    commands::container::{attach_container, set_focused_descendant},
+    models::{Monitor, Workspace},
+    traits::PositionGetters,
+  };
+
+  #[test]
+  fn reload_removes_side_areas_from_nonmatching_monitor() {
+    let side_area = Workspace::mock_side_area().call();
+    let workspace = Workspace::mock().call();
+    let monitor = Monitor::mock()
+      .device_name("DISPLAY2".to_string())
+      .workspaces(vec![side_area, workspace.clone()])
+      .call();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+    let mut state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+    attach_container(
+      &monitor.clone().into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+    set_focused_descendant(&workspace.clone().into(), None);
+
+    let config_path = std::env::temp_dir()
+      .join(format!("glazewm-reload-test-{}.yaml", Uuid::new_v4()));
+    fs::write(
+      &config_path,
+      r"
+side_areas:
+  left: 300px
+  match:
+    - device_name: { equals: DISPLAY1 }
+workspaces:
+  - name: '1'
+",
+    )
+    .unwrap();
+    let mut config = UserConfig::mock();
+    config.path = config_path.clone();
+
+    let result = reload_config(&mut state, &mut config);
+    fs::remove_file(config_path).unwrap();
+    result.unwrap();
+
+    assert!(monitor.side_area(SideArea::Left).is_none());
+    assert_eq!(workspace.to_rect().unwrap().width(), 1680);
+  }
+}

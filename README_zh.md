@@ -251,7 +251,7 @@ workspaces:
 
 ### 配置：持久侧边区域
 
-持久侧边区域可在每个显示器的左侧和/或右侧预留独立的平铺空间。
+默认情况下，持久侧边区域可在每个显示器的左侧和/或右侧预留独立的平铺空间。
 移动到该区域的窗口会在切换普通工作区时保持显示。侧边区域会遵循
 `gaps.outer_gap`，因此可通过上方或下方间距为 YASB 等状态栏预留空间。
 
@@ -264,6 +264,11 @@ side_areas:
   left: "300px"
   right: "20%"
 
+  # 可选的显示器选择条件。各项之间为“或”关系；省略 `match` 时应用于所有显示器。
+  # 可运行 `glazewm query monitors` 查看输出中的 `deviceName`。
+  match:
+    - device_name: { equals: "Your Display Name" }
+
 window_rules:
   - commands: ["move --side-area left"]
     match:
@@ -271,7 +276,9 @@ window_rules:
 ```
 
 也可以通过 `move --side-area left|right` 交互式移动窗口。侧边区域采用
-垂直平铺方向，并独立于普通工作区的激活与停用周期。
+垂直平铺方向，并独立于普通工作区的激活与停用周期。显示器选择条件支持与
+窗口规则相同的 `equals`、`includes`、`regex`、`not_equals` 和 `not_regex`
+匹配类型。未匹配的显示器会保留完整的普通工作区宽度。
 
 ### 配置：窗口规则
 

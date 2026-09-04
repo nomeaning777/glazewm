@@ -82,6 +82,10 @@ pub struct SideAreasConfig {
 
   /// Width reserved at the right edge of every monitor.
   pub right: LengthValue,
+
+  /// Optional match conditions for monitors where side areas are enabled.
+  #[serde(rename = "match")]
+  pub match_monitor: Option<Vec<MonitorMatchConfig>>,
 }
 
 impl Default for SideAreasConfig {
@@ -90,8 +94,29 @@ impl Default for SideAreasConfig {
       scale_with_dpi: true,
       left: LengthValue::from_px(0),
       right: LengthValue::from_px(0),
+      match_monitor: None,
     }
   }
+}
+
+impl SideAreasConfig {
+  /// Whether side areas are enabled for the given monitor device name.
+  #[must_use]
+  pub fn matches_monitor(&self, device_name: &str) -> bool {
+    self.match_monitor.as_ref().is_none_or(|match_configs| {
+      match_configs
+        .iter()
+        .any(|match_config| match_config.device_name.is_match(device_name))
+    })
+  }
+}
+
+/// Match conditions for selecting a monitor.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all(serialize = "camelCase"))]
+pub struct MonitorMatchConfig {
+  /// Match condition for the monitor's display device name.
+  pub device_name: MatchType,
 }
 
 /// Identifies one of the persistent side areas on a monitor.
@@ -544,5 +569,58 @@ side_padding:
     assert!(!parsed.side_areas.scale_with_dpi);
     assert_eq!(parsed.side_areas.left.amount, 0.25);
     assert_eq!(parsed.side_areas.right, LengthValue::from_px(320));
+  }
+
+  #[test]
+  fn side_areas_match_monitor_device_names() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match:
+    - device_name: { equals: DISPLAY1 }
+    - device_name: { regex: '^Studio Display$' }
+",
+    )
+    .unwrap();
+
+    assert!(parsed.side_areas.matches_monitor("DISPLAY1"));
+    assert!(parsed.side_areas.matches_monitor("Studio Display"));
+    assert!(!parsed.side_areas.matches_monitor("DISPLAY2"));
+  }
+
+  #[test]
+  fn side_areas_without_monitor_match_apply_to_every_monitor() {
+    let parsed =
+      serde_yaml::from_str::<ParsedConfig>("side_areas: {}").unwrap();
+
+    assert!(parsed.side_areas.matches_monitor("DISPLAY1"));
+    assert!(parsed.side_areas.matches_monitor("Studio Display"));
+  }
+
+  #[test]
+  fn empty_side_area_monitor_match_applies_to_no_monitors() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match: []
+",
+    )
+    .unwrap();
+
+    assert!(!parsed.side_areas.matches_monitor("DISPLAY1"));
+  }
+
+  #[test]
+  fn rejects_invalid_side_area_monitor_match() {
+    let result = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match:
+    - device_name: { glob: 'DISPLAY*' }
+",
+    );
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("side_areas.match[0]"), "{error}");
   }
 }

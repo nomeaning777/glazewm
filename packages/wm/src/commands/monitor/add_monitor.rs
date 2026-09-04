@@ -51,13 +51,18 @@ pub fn ensure_side_areas(
   state: &WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
+  let matches_monitor = config
+    .value
+    .side_areas
+    .matches_monitor(&monitor.native_properties().device_name);
+
   for (side, width) in [
     (SideArea::Left, config.value.side_areas.left.clone()),
     (SideArea::Right, config.value.side_areas.right.clone()),
   ] {
     let existing = monitor.side_area(side);
 
-    if width.amount <= 0.0 {
+    if !matches_monitor || width.amount <= 0.0 {
       if let Some(area) = existing {
         if let Some(target_workspace) = monitor.displayed_workspace() {
           let children = area.children().into_iter().collect::<Vec<_>>();
@@ -245,16 +250,58 @@ mod tests {
   };
 
   fn state_with_monitor(monitor: Monitor) -> WmState {
+    state_with_monitors(vec![monitor])
+  }
+
+  fn state_with_monitors(monitors: Vec<Monitor>) -> WmState {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
     let state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
-    attach_container(
-      &monitor.into(),
-      &state.root_container.clone().into(),
-      None,
+    for monitor in monitors {
+      attach_container(
+        &monitor.into(),
+        &state.root_container.clone().into(),
+        None,
+      )
+      .unwrap();
+    }
+    state
+  }
+
+  #[test]
+  fn enables_side_areas_only_for_matching_monitors() {
+    let selected_workspace = Workspace::mock().call();
+    let selected_monitor = Monitor::mock()
+      .device_name("DISPLAY1".to_string())
+      .workspaces(vec![selected_workspace.clone()])
+      .call();
+    let other_workspace = Workspace::mock().call();
+    let other_monitor = Monitor::mock()
+      .device_name("DISPLAY2".to_string())
+      .workspaces(vec![other_workspace.clone()])
+      .call();
+    let state = state_with_monitors(vec![
+      selected_monitor.clone(),
+      other_monitor.clone(),
+    ]);
+    let mut config = UserConfig::mock();
+    config.value = serde_yaml::from_str(
+      r"
+side_areas:
+  left: 300px
+  match:
+    - device_name: { equals: DISPLAY1 }
+",
     )
     .unwrap();
-    state
+
+    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+
+    assert!(selected_monitor.side_area(SideArea::Left).is_some());
+    assert!(other_monitor.side_area(SideArea::Left).is_none());
+    assert_eq!(selected_workspace.to_rect().unwrap().width(), 1380);
+    assert_eq!(other_workspace.to_rect().unwrap().width(), 1680);
   }
 
   #[test]
@@ -312,5 +359,36 @@ mod tests {
       window.workspace().map(|workspace| workspace.id()),
       Some(regular_workspace.id())
     );
+  }
+
+  #[test]
+  fn monitor_match_change_removes_stale_side_area() {
+    let window = TilingWindow::mock().call();
+    let side_area = Workspace::mock_side_area()
+      .side(SideArea::Left)
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let regular_workspace = Workspace::mock().call();
+    let monitor = Monitor::mock()
+      .device_name("DISPLAY2".to_string())
+      .workspaces(vec![side_area, regular_workspace.clone()])
+      .call();
+    let state = state_with_monitor(monitor.clone());
+    let mut config = UserConfig::mock();
+    config.value = serde_yaml::from_str(
+      r"
+side_areas:
+  left: 300px
+  match:
+    - device_name: { equals: DISPLAY1 }
+",
+    )
+    .unwrap();
+
+    ensure_side_areas(&monitor, &state, &config).unwrap();
+
+    assert!(monitor.side_area(SideArea::Left).is_none());
+    assert_eq!(window.workspace().unwrap().id(), regular_workspace.id());
+    assert_eq!(regular_workspace.to_rect().unwrap().width(), 1680);
   }
 }
