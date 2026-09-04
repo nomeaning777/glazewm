@@ -305,13 +305,10 @@ Windows can also be moved interactively with
 and are not part of the regular workspace activation/deactivation cycle.
 Monitor selectors support the same `equals`, `includes`, `regex`,
 `not_equals`, and `not_regex` match types as window rules. A monitor that
-does not match keeps its full regular workspace width. Before a window
-rule runs, each `move --side-area` is checked against the monitor it will
-reach after any earlier workspace moves. If the requested area is
-unavailable, or the destination cannot be predicted safely, the whole
-rule is deferred before any command runs. A `run_once` rule remains
-pending. Invoking the same command interactively returns an error when the
-requested area is unavailable.
+does not match keeps its full regular workspace width. If a window rule
+cannot use its requested side area, none of its commands are applied and
+the rule remains pending. Invoking the same command interactively returns
+an error when the requested area is unavailable.
 
 ### Config: Window rules
 
