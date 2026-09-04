@@ -357,6 +357,76 @@ workspaces:
     )
   }
 
+  fn keep_alive_reload_test_config(
+    side: SideArea,
+    recreate_workspace: bool,
+    display_name: &str,
+    outer_gap: i32,
+  ) -> String {
+    let side_name = match side {
+      SideArea::Left => "left",
+      SideArea::Right => "right",
+    };
+    let recreate_rule = if recreate_workspace {
+      r"
+  - commands:
+      - 'focus --workspace 2'
+      - 'focus --workspace 1'
+    match:
+      - window_process: { equals: workspace-activator }
+"
+    } else {
+      ""
+    };
+    format!(
+      r"
+general:
+  toggle_workspace_on_refocus: false
+side_areas:
+  left: 240px
+  right: 260px
+  match:
+    - device_name: {{ equals: DISPLAY1 }}
+gaps:
+  scale_with_dpi: false
+  inner_gap: 7px
+  outer_gap:
+    top: {outer_gap}px
+    right: {outer_gap}px
+    bottom: {outer_gap}px
+    left: {outer_gap}px
+window_effects:
+  focused_window:
+    border:
+      enabled: true
+window_rules:{recreate_rule}
+  - commands: ['move --workspace 1']
+    match:
+      - window_process: {{ equals: keep-alive-widget }}
+    run_once: false
+  - commands:
+      - 'focus --workspace 3'
+      - 'update-workspace-config --workspace 2 --keep-alive false'
+      - 'focus --workspace 1'
+      - 'move --next-active-workspace'
+      - 'move --side-area {side_name}'
+    match:
+      - window_process: {{ equals: keep-alive-widget }}
+workspaces:
+  - name: '1'
+    display_name: {display_name}-1
+    bind_to_monitor: 0
+  - name: '2'
+    display_name: {display_name}-2
+    bind_to_monitor: 0
+    keep_alive: true
+  - name: '3'
+    display_name: {display_name}-3
+    bind_to_monitor: 1
+"
+    )
+  }
+
   fn assert_window_rule_state(
     window: &WindowContainer,
     expected_side: Option<SideArea>,
@@ -460,6 +530,21 @@ workspaces:
     focus_anchor: TilingWindow,
     side: SideArea,
     starts_on_selected_monitor: bool,
+  }
+
+  struct KeepAliveReloadFixture {
+    state: WmState,
+    config: UserConfig,
+    config_path: std::path::PathBuf,
+    monitors: [Monitor; 2],
+    workspaces: [Workspace; 3],
+    subject: TilingWindow,
+    side: SideArea,
+    starts_on_selected_monitor: bool,
+    initial_focus_id: Uuid,
+    initial_recent_workspace: Option<String>,
+    initial_workspace_ids: Vec<Uuid>,
+    workspace_2_id: Uuid,
   }
 
   impl FocusRecentReloadFixture {
@@ -623,6 +708,231 @@ workspaces:
       [
         self.monitors[0].side_area(SideArea::Left).unwrap().id(),
         self.monitors[0].side_area(SideArea::Right).unwrap().id(),
+      ]
+    }
+
+    fn cleanup(&self) {
+      fs::remove_file(&self.config_path).unwrap();
+    }
+  }
+
+  impl KeepAliveReloadFixture {
+    #[allow(clippy::too_many_lines)]
+    fn new(side: SideArea, starts_on_selected_monitor: bool) -> Self {
+      let subject = TilingWindow::mock()
+        .process_name("keep-alive-widget".to_string())
+        .call();
+      let workspace_activator = TilingWindow::mock()
+        .process_name("workspace-activator".to_string())
+        .call();
+      let workspace_3_anchor = TilingWindow::mock().call();
+      let mut workspace_1_children = Vec::new();
+      if !starts_on_selected_monitor {
+        workspace_1_children.push(workspace_activator.into());
+      }
+      workspace_1_children.push(subject.clone().into());
+
+      let workspaces = [
+        Workspace::mock()
+          .name("1".to_string())
+          .tiling_containers(workspace_1_children)
+          .call(),
+        Workspace::mock().name("2".to_string()).call(),
+        Workspace::mock()
+          .name("3".to_string())
+          .tiling_containers(vec![workspace_3_anchor.into()])
+          .call(),
+      ];
+      let mut workspace_2_config = workspaces[1].config();
+      workspace_2_config.keep_alive = true;
+      workspaces[1].set_config(workspace_2_config);
+
+      let monitor_names = if starts_on_selected_monitor {
+        ["DISPLAY1", "DISPLAY2"]
+      } else {
+        ["DISPLAY2", "DISPLAY1"]
+      };
+      let monitors = [
+        Monitor::mock()
+          .device_name(monitor_names[0].to_string())
+          .workspaces(vec![workspaces[0].clone(), workspaces[1].clone()])
+          .call(),
+        Monitor::mock()
+          .device_name(monitor_names[1].to_string())
+          .workspaces(vec![workspaces[2].clone()])
+          .call(),
+      ];
+      let (event_tx, _event_rx) = mpsc::unbounded_channel();
+      let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+      let mut state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+      for monitor in &monitors {
+        attach_container(
+          &monitor.clone().into(),
+          &state.root_container.clone().into(),
+          None,
+        )
+        .unwrap();
+      }
+      set_focused_descendant(&subject.clone().into(), None);
+      state.recent_workspace_name = Some("3".to_string());
+
+      let initial_focus_id = state.focused_container().unwrap().id();
+      let initial_recent_workspace = state.recent_workspace_name.clone();
+      let initial_workspace_ids = state
+        .workspaces()
+        .into_iter()
+        .map(|workspace| workspace.id())
+        .collect();
+      let workspace_2_id = workspaces[1].id();
+      let config_path = std::env::temp_dir().join(format!(
+        "glazewm-reload-keep-alive-rule-test-{}.yaml",
+        Uuid::new_v4()
+      ));
+      let mut config = UserConfig::mock();
+      config.path = config_path.clone();
+
+      Self {
+        state,
+        config,
+        config_path,
+        monitors,
+        workspaces,
+        subject,
+        side,
+        starts_on_selected_monitor,
+        initial_focus_id,
+        initial_recent_workspace,
+        initial_workspace_ids,
+        workspace_2_id,
+      }
+    }
+
+    fn reload(&mut self, display_name: &str, outer_gap: i32) {
+      self.state.pending_sync.clear();
+      fs::write(
+        &self.config_path,
+        keep_alive_reload_test_config(
+          self.side,
+          !self.starts_on_selected_monitor,
+          display_name,
+          outer_gap,
+        ),
+      )
+      .unwrap();
+      let result = reload_config(&mut self.state, &mut self.config);
+      assert!(
+        result.is_ok(),
+        "reload partially applied the keep_alive rule: {:?}",
+        result.err()
+      );
+    }
+
+    fn assert_selected_monitor(&self) {
+      for monitor in &self.monitors {
+        let selected =
+          monitor.native_properties().device_name == "DISPLAY1";
+        assert_monitor_side_areas(monitor, selected);
+      }
+    }
+
+    fn assert_rule_state(&self) {
+      if self.starts_on_selected_monitor {
+        assert_eq!(
+          self.subject.workspace().map(|workspace| workspace.id()),
+          Some(self.workspaces[0].id())
+        );
+        assert_eq!(
+          self.state.focused_container().unwrap().id(),
+          self.initial_focus_id
+        );
+        assert_eq!(
+          self.state.recent_workspace_name,
+          self.initial_recent_workspace
+        );
+        assert_eq!(
+          self
+            .state
+            .workspaces()
+            .into_iter()
+            .map(|workspace| workspace.id())
+            .collect::<Vec<_>>(),
+          self.initial_workspace_ids
+        );
+        assert!(self.workspaces[1].config().keep_alive);
+        assert_eq!(
+          self.state.workspace_by_name("2").unwrap().id(),
+          self.workspace_2_id
+        );
+        assert!(self.state.container_by_id(self.workspace_2_id).is_some());
+        assert_eq!(self.subject.done_window_rules().len(), 0);
+      } else {
+        assert_eq!(
+          self
+            .subject
+            .workspace()
+            .and_then(|workspace| workspace.side_area()),
+          Some(self.side)
+        );
+        assert_eq!(self.subject.done_window_rules().len(), 1);
+        assert!(!self.workspaces[1].config().keep_alive);
+        assert!(self.state.workspace_by_name("2").is_none());
+        assert!(self.state.container_by_id(self.workspace_2_id).is_none());
+        assert_eq!(
+          self
+            .state
+            .sorted_workspaces(&self.config)
+            .into_iter()
+            .map(|workspace| workspace.config().name)
+            .collect::<Vec<_>>(),
+          vec!["1".to_string(), "3".to_string()]
+        );
+      }
+    }
+
+    fn assert_late_reload_updates(
+      &self,
+      display_name: &str,
+      outer_gap: f32,
+    ) {
+      let workspace_indexes: &[usize] = if self.starts_on_selected_monitor
+      {
+        &[0, 1, 2]
+      } else {
+        &[0, 2]
+      };
+      for index in workspace_indexes {
+        let workspace = &self.workspaces[*index];
+        assert_eq!(
+          workspace.config().display_name.as_deref(),
+          Some(format!("{display_name}-{}", index + 1).as_str())
+        );
+        assert_eq!(workspace.outer_gaps().top.amount, outer_gap);
+        assert_eq!(workspace.outer_gaps().right.amount, outer_gap);
+      }
+      assert!(
+        self
+          .config
+          .value
+          .window_effects
+          .focused_window
+          .border
+          .enabled
+      );
+      #[cfg(target_os = "windows")]
+      assert!(self.state.pending_sync.needs_all_effects_update());
+    }
+
+    fn area_ids(&self) -> [Uuid; 2] {
+      let monitor = self
+        .monitors
+        .iter()
+        .find(|monitor| {
+          monitor.native_properties().device_name == "DISPLAY1"
+        })
+        .unwrap();
+      [
+        monitor.side_area(SideArea::Left).unwrap().id(),
+        monitor.side_area(SideArea::Right).unwrap().id(),
       ]
     }
 
@@ -1018,6 +1328,36 @@ workspaces:
       for starts_on_selected_monitor in [true, false] {
         let mut fixture =
           FocusRecentReloadFixture::new(side, starts_on_selected_monitor);
+
+        fixture.reload("first", 11);
+        fixture.assert_selected_monitor();
+        fixture.assert_rule_state();
+        fixture.assert_late_reload_updates("first", 11.0);
+
+        let initial_area_ids = fixture.area_ids();
+        fixture.reload("second", 17);
+        fixture.assert_selected_monitor();
+        fixture.assert_rule_state();
+        assert_eq!(fixture.area_ids(), initial_area_ids);
+        fixture.assert_late_reload_updates("second", 17.0);
+
+        fixture.reload("third", 23);
+        fixture.assert_selected_monitor();
+        fixture.assert_rule_state();
+        assert_eq!(fixture.area_ids(), initial_area_ids);
+        fixture.assert_late_reload_updates("third", 23.0);
+
+        fixture.cleanup();
+      }
+    }
+  }
+
+  #[test]
+  fn reload_preflights_keep_alive_updates_before_both_side_areas() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for starts_on_selected_monitor in [true, false] {
+        let mut fixture =
+          KeepAliveReloadFixture::new(side, starts_on_selected_monitor);
 
         fixture.reload("first", 11);
         fixture.assert_selected_monitor();

@@ -1,7 +1,8 @@
 use tracing::info;
 use wm_common::{
-  InvokeCommand, InvokeFocusCommand, InvokeMoveCommand, SideArea,
-  WindowRuleConfig, WindowRuleEvent,
+  InvokeCommand, InvokeFocusCommand, InvokeMoveCommand,
+  InvokeUpdateWorkspaceConfig, SideArea, WindowRuleConfig,
+  WindowRuleEvent,
 };
 use wm_platform::Direction;
 
@@ -192,6 +193,37 @@ impl<'a> PredictedWorkspaceState<'a> {
       .workspaces
       .iter()
       .find(|workspace| workspace.name == name)
+  }
+
+  /// Applies config fields that affect workspace target resolution.
+  fn update_workspace_config(
+    &mut self,
+    name: &str,
+    new_config: &InvokeUpdateWorkspaceConfig,
+  ) -> Result<bool, String> {
+    let renamed = new_config
+      .name
+      .as_ref()
+      .is_some_and(|new_name| new_name != name);
+    if renamed
+      && new_config
+        .name
+        .as_ref()
+        .is_some_and(|new_name| self.workspace_by_name(new_name).is_some())
+    {
+      return Err("the updated workspace name already exists".to_string());
+    }
+
+    let workspace = self
+      .workspaces
+      .iter_mut()
+      .find(|workspace| workspace.name == name)
+      .ok_or_else(|| format!("active workspace {name:?} was not found"))?;
+    if let Some(keep_alive) = new_config.keep_alive {
+      workspace.keep_alive = keep_alive;
+    }
+
+    Ok(renamed)
   }
 
   /// Gets the predicted displayed workspace on a monitor.
@@ -638,6 +670,55 @@ impl<'a> SideAreaRulePreflight<'a> {
     }
   }
 
+  /// Preflights the workspace state changed by a config update.
+  fn update_workspace_config(
+    &mut self,
+    workspace_name: Option<&str>,
+    new_config: &InvokeUpdateWorkspaceConfig,
+  ) -> Option<String> {
+    let target_name = match workspace_name {
+      Some(name) => name.to_string(),
+      None => match &self.location {
+        // Updating a side area is a runtime no-op.
+        Ok(location) => location.workspace_name.clone()?,
+        Err(reason) => {
+          return Some(format!(
+            "the subject workspace for a config update cannot be predicted \
+             because {reason}"
+          ));
+        }
+      },
+    };
+
+    let renamed = match &mut self.workspace_state {
+      Ok(workspace_state) => {
+        match workspace_state
+          .update_workspace_config(&target_name, new_config)
+        {
+          Ok(renamed) => renamed,
+          Err(reason) => {
+            return Some(format!(
+              "the workspace config update cannot be predicted because \
+               {reason}"
+            ));
+          }
+        }
+      }
+      Err(reason) => {
+        return Some(format!(
+          "the workspace config update cannot be predicted because {reason}"
+        ));
+      }
+    };
+
+    if renamed {
+      self.invalidate_workspace_state(
+        "a preceding workspace rename changes target resolution",
+      );
+    }
+    None
+  }
+
   /// Preflights moving the subject's workspace between monitors.
   fn move_workspace(&mut self, direction: &Direction) {
     self.location = self.location.clone().and_then(|mut current| {
@@ -704,12 +785,15 @@ fn side_area_rule_defer_reason(
         preflight.move_workspace(direction);
       }
       InvokeCommand::Focus(args) => preflight.focus(args),
-      InvokeCommand::UpdateWorkspaceConfig { new_config, .. }
-        if new_config.name.is_some() =>
-      {
-        preflight.invalidate_workspace_state(
-          "a preceding workspace rename changes target resolution",
-        );
+      InvokeCommand::UpdateWorkspaceConfig {
+        workspace,
+        new_config,
+      } => {
+        if let Some(reason) = preflight
+          .update_workspace_config(workspace.as_deref(), new_config)
+        {
+          return Some(reason);
+        }
       }
       InvokeCommand::FocusNextTab
       | InvokeCommand::FocusPreviousTab
@@ -1233,6 +1317,227 @@ workspaces:
     assert!(other_monitor.side_area(side).is_none());
   }
 
+  #[allow(clippy::too_many_lines)]
+  fn assert_keep_alive_update_changes_next_active_preflight(
+    side: SideArea,
+    starts_on_selected_monitor: bool,
+  ) {
+    let subject = TilingWindow::mock()
+      .process_name("widget".to_string())
+      .call();
+    let workspace_3_anchor = TilingWindow::mock().call();
+    let workspace_1 = Workspace::mock()
+      .name("1".to_string())
+      .tiling_containers(vec![subject.clone().into()])
+      .call();
+    let workspace_2 = Workspace::mock().name("2".to_string()).call();
+    let mut workspace_2_config = workspace_2.config();
+    workspace_2_config.keep_alive = true;
+    workspace_2.set_config(workspace_2_config);
+    let workspace_3 = Workspace::mock()
+      .name("3".to_string())
+      .tiling_containers(vec![workspace_3_anchor.into()])
+      .call();
+
+    let (selected_workspaces, other_workspaces) =
+      if starts_on_selected_monitor {
+        (
+          vec![workspace_1.clone(), workspace_2.clone()],
+          vec![workspace_3.clone()],
+        )
+      } else {
+        (
+          vec![workspace_3.clone()],
+          vec![workspace_1.clone(), workspace_2.clone()],
+        )
+      };
+    let selected_monitor = Monitor::mock()
+      .device_name("DISPLAY1".to_string())
+      .workspaces(selected_workspaces)
+      .call();
+    let other_monitor = Monitor::mock()
+      .device_name("DISPLAY2".to_string())
+      .workspaces(other_workspaces)
+      .call();
+    let mut state = state_with_monitors(vec![
+      selected_monitor.clone(),
+      other_monitor.clone(),
+    ]);
+    set_focused_descendant(&subject.clone().into(), None);
+    state.recent_workspace_name = Some("3".to_string());
+
+    let initial_focus_id = state.focused_container().unwrap().id();
+    let initial_recent = state.recent_workspace_name.clone();
+    let initial_workspace_ids = state
+      .workspaces()
+      .into_iter()
+      .map(|workspace| workspace.id())
+      .collect::<Vec<_>>();
+    let workspace_2_id = workspace_2.id();
+    let side_name = match side {
+      SideArea::Left => "left",
+      SideArea::Right => "right",
+    };
+    let parsed_config = serde_yaml::from_str::<ParsedConfig>(&format!(
+      r"
+general:
+  toggle_workspace_on_refocus: false
+side_areas:
+  left: 300px
+  right: 300px
+  match:
+    - device_name: {{ equals: DISPLAY1 }}
+window_rules:
+  - commands:
+      - 'focus --workspace 3'
+      - 'update-workspace-config --workspace 2 --keep-alive false'
+      - 'focus --workspace 1'
+      - 'move --next-active-workspace'
+      - 'move --side-area {side_name}'
+    match:
+      - window_process: {{ equals: widget }}
+workspaces:
+  - name: '1'
+  - name: '2'
+    keep_alive: true
+  - name: '3'
+"
+    ))
+    .unwrap();
+    let mut config = UserConfig::mock_with_value(parsed_config);
+
+    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    let initial_area_ids = side_area_ids(&selected_monitor);
+
+    let result = run_window_rules(
+      subject.clone().into(),
+      &WindowRuleEvent::Manage,
+      &mut state,
+      &mut config,
+    );
+    assert!(
+      result.is_ok(),
+      "rule partially applied after changing keep_alive: {:?}",
+      result.err()
+    );
+
+    if starts_on_selected_monitor {
+      assert_eq!(
+        subject.workspace().map(|workspace| workspace.id()),
+        Some(workspace_1.id())
+      );
+      assert_eq!(
+        state.focused_container().unwrap().id(),
+        initial_focus_id
+      );
+      assert_eq!(state.recent_workspace_name, initial_recent);
+      assert_eq!(
+        state
+          .workspaces()
+          .into_iter()
+          .map(|workspace| workspace.id())
+          .collect::<Vec<_>>(),
+        initial_workspace_ids
+      );
+      assert!(workspace_2.config().keep_alive);
+      assert_eq!(
+        state.workspace_by_name("2").unwrap().id(),
+        workspace_2_id
+      );
+      assert_eq!(subject.done_window_rules().len(), 0);
+    } else {
+      assert_eq!(
+        subject
+          .workspace()
+          .and_then(|workspace| workspace.side_area()),
+        Some(side)
+      );
+      assert_eq!(subject.done_window_rules().len(), 1);
+      assert!(!workspace_2.config().keep_alive);
+      assert!(state.workspace_by_name("2").is_none());
+      assert!(state.container_by_id(workspace_2_id).is_none());
+      assert_eq!(
+        state
+          .sorted_workspaces(&config)
+          .into_iter()
+          .map(|workspace| workspace.config().name)
+          .collect::<Vec<_>>(),
+        vec!["1".to_string(), "3".to_string()]
+      );
+    }
+
+    assert_eq!(side_area_ids(&selected_monitor), initial_area_ids);
+    assert!(other_monitor.side_area(side).is_none());
+  }
+
+  fn assert_subject_workspace_config_target(
+    side: SideArea,
+    update_before_side_area: bool,
+  ) {
+    let subject = TilingWindow::mock()
+      .process_name("widget".to_string())
+      .call();
+    let workspace = Workspace::mock()
+      .name("1".to_string())
+      .tiling_containers(vec![subject.clone().into()])
+      .call();
+    let monitor = Monitor::mock()
+      .device_name("DISPLAY1".to_string())
+      .workspaces(vec![workspace.clone()])
+      .call();
+    let mut state = state_with_monitors(vec![monitor.clone()]);
+    set_focused_descendant(&subject.clone().into(), None);
+    let side_name = match side {
+      SideArea::Left => "left",
+      SideArea::Right => "right",
+    };
+    let commands = if update_before_side_area {
+      format!(
+        "['update-workspace-config --keep-alive true', \
+         'move --side-area {side_name}']"
+      )
+    } else {
+      format!(
+        "['move --side-area {side_name}', \
+         'update-workspace-config --keep-alive true']"
+      )
+    };
+    let parsed_config = serde_yaml::from_str::<ParsedConfig>(&format!(
+      r"
+side_areas:
+  left: 300px
+  right: 300px
+window_rules:
+  - commands: {commands}
+    match:
+      - window_process: {{ equals: widget }}
+workspaces:
+  - name: '1'
+"
+    ))
+    .unwrap();
+    let mut config = UserConfig::mock_with_value(parsed_config);
+    ensure_side_areas(&monitor, &state, &config).unwrap();
+
+    run_window_rules(
+      subject.clone().into(),
+      &WindowRuleEvent::Manage,
+      &mut state,
+      &mut config,
+    )
+    .unwrap();
+
+    assert_eq!(
+      subject
+        .workspace()
+        .and_then(|subject_workspace| subject_workspace.side_area()),
+      Some(side)
+    );
+    assert_eq!(workspace.config().keep_alive, update_before_side_area);
+    assert_eq!(subject.done_window_rules().len(), 1);
+  }
+
   #[test]
   fn manage_side_area_rule_skips_nonmatching_monitors_for_both_sides() {
     assert_manage_rule_respects_monitor_selector(SideArea::Left);
@@ -1260,6 +1565,22 @@ workspaces:
     for side in [SideArea::Left, SideArea::Right] {
       assert_inactive_focus_changes_next_active_preflight(side, false);
       assert_inactive_focus_changes_next_active_preflight(side, true);
+    }
+  }
+
+  #[test]
+  fn manage_preflights_keep_alive_updates_before_both_side_areas() {
+    for side in [SideArea::Left, SideArea::Right] {
+      assert_keep_alive_update_changes_next_active_preflight(side, true);
+      assert_keep_alive_update_changes_next_active_preflight(side, false);
+    }
+  }
+
+  #[test]
+  fn manage_resolves_subject_workspace_config_targets() {
+    for side in [SideArea::Left, SideArea::Right] {
+      assert_subject_workspace_config_target(side, true);
+      assert_subject_workspace_config_target(side, false);
     }
   }
 }
