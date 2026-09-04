@@ -33,7 +33,7 @@ use crate::{
     },
     workspace::{
       focus_workspace, move_workspace_in_direction,
-      update_workspace_config,
+      update_workspace_config, workspace_target_from_focus_command,
     },
   },
   events::{
@@ -44,7 +44,7 @@ use crate::{
     handle_window_title_changed,
   },
   ipc_server::IpcServer,
-  models::{Container, WorkspaceTarget},
+  models::Container,
   traits::{CommonGetters, WindowGetters},
   user_config::UserConfig,
   wm_state::WmState,
@@ -306,66 +306,14 @@ impl WindowManager {
       InvokeCommand::Focus(args) => {
         if let Some(direction) = &args.direction {
           focus_in_direction(&subject_container, direction, state)?;
-        }
-
-        if let Some(direction) = &args.workspace_in_direction {
-          focus_workspace(
-            WorkspaceTarget::Direction(direction.clone()),
-            state,
-            config,
-          )?;
-        }
-
-        if let Some(container_id) = &args.container_id {
+        } else if let Some(target) =
+          workspace_target_from_focus_command(args)
+        {
+          focus_workspace(target, state, config)?;
+        } else if let Some(container_id) = &args.container_id {
           focus_container_by_id(container_id, state)?;
-        }
-
-        if let Some(name) = &args.workspace {
-          focus_workspace(
-            WorkspaceTarget::Name(name.clone()),
-            state,
-            config,
-          )?;
-        }
-
-        if let Some(monitor_index) = &args.monitor {
+        } else if let Some(monitor_index) = &args.monitor {
           focus_monitor(*monitor_index, state, config)?;
-        }
-
-        if args.next_active_workspace {
-          focus_workspace(WorkspaceTarget::NextActive, state, config)?;
-        }
-
-        if args.prev_active_workspace {
-          focus_workspace(WorkspaceTarget::PreviousActive, state, config)?;
-        }
-
-        if args.next_workspace {
-          focus_workspace(WorkspaceTarget::Next, state, config)?;
-        }
-
-        if args.prev_workspace {
-          focus_workspace(WorkspaceTarget::Previous, state, config)?;
-        }
-
-        if args.recent_workspace {
-          focus_workspace(WorkspaceTarget::Recent, state, config)?;
-        }
-
-        if args.next_active_workspace_on_monitor {
-          focus_workspace(
-            WorkspaceTarget::NextActiveInMonitor,
-            state,
-            config,
-          )?;
-        }
-
-        if args.prev_active_workspace_on_monitor {
-          focus_workspace(
-            WorkspaceTarget::PreviousActiveInMonitor,
-            state,
-            config,
-          )?;
         }
 
         Ok(())
