@@ -3,21 +3,27 @@
 //! This module provides default values and helper functions used by the
 //! mock builders in the model modules.
 
+use std::collections::HashSet;
+
 use bon::bon;
+use tokio::sync::mpsc;
 use wm_common::{
   FloatingStateConfig, GapsConfig, SideArea, TilingDirection, WindowState,
   WorkspaceConfig,
 };
-use wm_platform::{Display, LengthValue, NativeWindow, Rect, RectDelta};
+use wm_platform::{
+  Dispatcher, Display, LengthValue, NativeWindow, Rect, RectDelta,
+};
 
 use crate::{
   commands::container::attach_container,
   models::{
-    Monitor, NativeMonitorProperties, NativeWindowProperties,
+    Container, Monitor, NativeMonitorProperties, NativeWindowProperties,
     NonTilingWindow, SplitContainer, TabbedContainer, TilingContainer,
     TilingWindow, Workspace,
   },
-  traits::TilingSizeGetters,
+  traits::{CommonGetters, TilingSizeGetters},
+  wm_state::WmState,
 };
 
 pub const MOCK_MONITOR_WIDTH: i32 = 1680;
@@ -27,6 +33,84 @@ pub const MOCK_DPI: u32 = 96;
 pub const MOCK_SCALE_FACTOR: f32 = 1.0;
 pub const MOCK_WINDOW_WIDTH: i32 = 300;
 pub const MOCK_WINDOW_HEIGHT: i32 = 200;
+
+/// Creates a test state with the supplied monitors attached to its root.
+pub fn state_with_monitors(monitors: Vec<Monitor>) -> WmState {
+  let (event_tx, _event_rx) = mpsc::unbounded_channel();
+  let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+  let state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+  for monitor in monitors {
+    attach_container(
+      &monitor.into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+  }
+  state
+}
+
+/// Creates a side area containing a leaf and a nested split in either
+/// layout order, with focus order differing from layout order.
+pub fn mixed_side_area(
+  side: SideArea,
+  split_first: bool,
+) -> (Workspace, SplitContainer, Vec<TilingWindow>) {
+  let leaf = TilingWindow::mock().title("leaf".to_string()).call();
+  let nested_first = TilingWindow::mock()
+    .title("nested-first".to_string())
+    .call();
+  let nested_second = TilingWindow::mock()
+    .title("nested-second".to_string())
+    .call();
+  let split = SplitContainer::mock()
+    .tiling_direction(TilingDirection::Horizontal)
+    .tiling_containers(vec![
+      nested_first.clone().into(),
+      nested_second.clone().into(),
+    ])
+    .call();
+  split.borrow_child_focus_order_mut().swap(0, 1);
+
+  let children = if split_first {
+    vec![split.clone().into(), leaf.clone().into()]
+  } else {
+    vec![leaf.clone().into(), split.clone().into()]
+  };
+  let area = Workspace::mock_side_area()
+    .side(side)
+    .tiling_containers(children)
+    .call();
+  area.borrow_child_focus_order_mut().swap(0, 1);
+
+  (area, split, vec![leaf, nested_first, nested_second])
+}
+
+/// Asserts that every child has the expected parent and that each raw
+/// focus-order ID identifies exactly one current child.
+pub fn assert_tree_links_and_focus_order(container: &Container) {
+  let children = container.children();
+  let child_ids = children
+    .iter()
+    .map(CommonGetters::id)
+    .collect::<HashSet<_>>();
+  let focus_ids = container
+    .borrow_child_focus_order()
+    .iter()
+    .copied()
+    .collect::<HashSet<_>>();
+
+  assert_eq!(container.borrow_child_focus_order().len(), children.len());
+  assert_eq!(focus_ids, child_ids);
+
+  for child in children {
+    assert_eq!(
+      child.parent().map(|parent| parent.id()),
+      Some(container.id())
+    );
+    assert_tree_links_and_focus_order(&child);
+  }
+}
 
 pub fn mock_bounds() -> Rect {
   Rect::from_xy(0, 0, MOCK_MONITOR_WIDTH, MOCK_MONITOR_HEIGHT)

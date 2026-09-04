@@ -3,11 +3,11 @@ use tracing::info;
 use wm_common::{SideArea, WindowState, WmEvent};
 use wm_platform::Display;
 
+use super::move_side_area_contents;
 use crate::{
   commands::{
     container::{
-      attach_container, detach_container, flatten_child_split_containers,
-      move_container_within_tree,
+      attach_container, detach_container, move_container_within_tree,
     },
     workspace::{activate_workspace, sort_workspaces},
   },
@@ -64,19 +64,11 @@ pub fn ensure_side_areas(
 
     if !matches_monitor || width.amount <= 0.0 {
       if let Some(area) = existing {
-        if let Some(target_workspace) = monitor.displayed_workspace() {
-          let children = area.children().into_iter().collect::<Vec<_>>();
-          for child in &children {
-            move_container_within_tree(
-              child,
-              &target_workspace.clone().into(),
-              target_workspace.child_count(),
-              state,
-            )?;
-          }
-          flatten_child_split_containers(
-            &target_workspace.clone().into(),
-          )?;
+        if area.has_children() {
+          let target_workspace = monitor
+            .displayed_workspace()
+            .context("No target workspace for side-area windows.")?;
+          move_side_area_contents(&area, &target_workspace, state)?;
         }
         detach_container(area.into())?;
       }
@@ -239,33 +231,64 @@ pub fn move_workspace_to_monitor(
 
 #[cfg(test)]
 mod tests {
-  use tokio::sync::mpsc;
   use wm_common::{FloatingStateConfig, GapsConfig};
-  use wm_platform::{Dispatcher, LengthValue};
+  use wm_platform::LengthValue;
 
   use super::*;
   use crate::{
-    commands::container::attach_container,
     models::{SplitContainer, TilingWindow},
+    test_utils::{
+      assert_tree_links_and_focus_order, mixed_side_area,
+      state_with_monitors,
+    },
   };
 
   fn state_with_monitor(monitor: Monitor) -> WmState {
     state_with_monitors(vec![monitor])
   }
 
-  fn state_with_monitors(monitors: Vec<Monitor>) -> WmState {
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
-    let state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
-    for monitor in monitors {
-      attach_container(
-        &monitor.into(),
-        &state.root_container.clone().into(),
-        None,
-      )
-      .unwrap();
+  fn assert_side_area_contents_evacuated(
+    side: SideArea,
+    split_first: bool,
+    monitor_name: &str,
+    config: &UserConfig,
+  ) {
+    let (side_area, split, windows) = mixed_side_area(side, split_first);
+    let existing =
+      TilingWindow::mock().title("existing".to_string()).call();
+    let regular_workspace = Workspace::mock()
+      .tiling_containers(vec![existing.into()])
+      .call();
+    let monitor = Monitor::mock()
+      .device_name(monitor_name.to_string())
+      .workspaces(vec![side_area.clone(), regular_workspace.clone()])
+      .call();
+    let state = state_with_monitor(monitor.clone());
+
+    ensure_side_areas(&monitor, &state, config).unwrap();
+
+    assert!(monitor.side_area(side).is_none());
+    assert!(side_area.is_detached());
+    assert!(!side_area.has_children());
+    assert!(side_area.borrow_child_focus_order().is_empty());
+    if split.is_detached() {
+      assert!(!split.has_children());
+    } else {
+      assert_eq!(
+        split.workspace().map(|workspace| workspace.id()),
+        Some(regular_workspace.id())
+      );
     }
-    state
+    for window in windows {
+      assert_eq!(
+        window.workspace().map(|workspace| workspace.id()),
+        Some(regular_workspace.id())
+      );
+      assert!(!window.has_pending_dpi_adjustment());
+    }
+    assert_tree_links_and_focus_order(
+      &state.root_container.clone().into(),
+    );
   }
 
   #[test]
@@ -390,5 +413,42 @@ side_areas:
     assert!(monitor.side_area(SideArea::Left).is_none());
     assert_eq!(window.workspace().unwrap().id(), regular_workspace.id());
     assert_eq!(regular_workspace.to_rect().unwrap().width(), 1680);
+  }
+
+  #[test]
+  fn selector_change_evacuates_mixed_side_area_children_in_both_orders() {
+    let mut config = UserConfig::mock();
+    config.value = serde_yaml::from_str(
+      r"
+side_areas:
+  left: 300px
+  match:
+    - device_name: { equals: DISPLAY1 }
+",
+    )
+    .unwrap();
+
+    for split_first in [false, true] {
+      assert_side_area_contents_evacuated(
+        SideArea::Left,
+        split_first,
+        "DISPLAY2",
+        &config,
+      );
+    }
+  }
+
+  #[test]
+  fn zero_width_evacuates_mixed_side_area_children_in_both_orders() {
+    let config = UserConfig::mock();
+
+    for split_first in [false, true] {
+      assert_side_area_contents_evacuated(
+        SideArea::Right,
+        split_first,
+        "DISPLAY1",
+        &config,
+      );
+    }
   }
 }

@@ -7,6 +7,7 @@ use crate::{
   },
   models::WindowContainer,
   traits::{CommonGetters, PositionGetters, WindowGetters},
+  user_config::UserConfig,
   wm_state::WmState,
 };
 
@@ -15,14 +16,38 @@ pub fn move_window_to_side_area(
   window: WindowContainer,
   side: SideArea,
   state: &mut WmState,
+  config: &UserConfig,
 ) -> anyhow::Result<()> {
   let current_workspace =
     window.workspace().context("Window has no workspace.")?;
   let monitor = window.monitor().context("Window has no monitor.")?;
   let target_area = monitor.side_area(side).with_context(|| {
-    format!(
-      "The {side:?} side area is disabled. Configure a positive width first."
-    )
+    let device_name = monitor.native_properties().device_name;
+    let side_areas = &config.value.side_areas;
+
+    if side_areas.matches_monitor(&device_name) {
+      let configured_width = match side {
+        SideArea::Left => &side_areas.left,
+        SideArea::Right => &side_areas.right,
+      };
+
+      if configured_width.amount <= 0.0 {
+        format!(
+          "The {side:?} side area is disabled on monitor {device_name:?}. \
+           Configure a positive width first."
+        )
+      } else {
+        format!(
+          "The {side:?} side area is configured but unavailable on monitor \
+          {device_name:?}. Reload the config and try again."
+        )
+      }
+    } else {
+      format!(
+        "The {side:?} side area is unavailable on monitor {device_name:?} \
+         because it does not match side_areas.match."
+      )
+    }
   })?;
 
   if current_workspace.id() == target_area.id() {
@@ -140,6 +165,7 @@ mod tests {
       window.clone().into(),
       SideArea::Left,
       &mut state,
+      &UserConfig::mock(),
     )
     .unwrap();
 
@@ -191,8 +217,13 @@ mod tests {
       &config,
     )
     .unwrap();
-    move_window_to_side_area(floating.clone(), SideArea::Left, &mut state)
-      .unwrap();
+    move_window_to_side_area(
+      floating.clone(),
+      SideArea::Left,
+      &mut state,
+      &UserConfig::mock(),
+    )
+    .unwrap();
 
     let restored = update_window_state(
       floating,
@@ -206,5 +237,58 @@ mod tests {
       restored.workspace().map(|workspace| workspace.id()),
       Some(side_area.id())
     );
+  }
+
+  #[test]
+  fn missing_side_area_error_explains_selector_or_width() {
+    let window = TilingWindow::mock().call();
+    let workspace = Workspace::mock()
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let monitor = Monitor::mock()
+      .device_name("DISPLAY2".to_string())
+      .workspaces(vec![workspace])
+      .call();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+    let mut state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+    attach_container(
+      &monitor.into(),
+      &state.root_container.clone().into(),
+      None,
+    )
+    .unwrap();
+
+    let mut config = UserConfig::mock();
+    config.value.side_areas.match_monitor =
+      Some(vec![wm_common::MonitorMatchConfig {
+        device_name: wm_common::MatchType::Equals {
+          equals: "DISPLAY1".to_string(),
+        },
+      }]);
+    let error = move_window_to_side_area(
+      window.clone().into(),
+      SideArea::Left,
+      &mut state,
+      &config,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("DISPLAY2"), "{error}");
+    assert!(error.contains("side_areas.match"), "{error}");
+
+    config.value.side_areas.match_monitor = None;
+    let error = move_window_to_side_area(
+      window.into(),
+      SideArea::Left,
+      &mut state,
+      &config,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("positive width"), "{error}");
+    assert!(!error.contains("does not match"), "{error}");
   }
 }

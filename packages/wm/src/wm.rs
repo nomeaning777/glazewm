@@ -406,7 +406,12 @@ impl WindowManager {
             }
 
             if let Some(side) = args.side_area {
-              move_window_to_side_area(window.clone(), side, state)?;
+              move_window_to_side_area(
+                window.clone(),
+                side,
+                state,
+                config,
+              )?;
             }
 
             if args.next_active_workspace {

@@ -217,9 +217,227 @@ mod tests {
   use super::*;
   use crate::{
     commands::container::{attach_container, set_focused_descendant},
-    models::{Monitor, Workspace},
-    traits::PositionGetters,
+    models::{Monitor, TilingWindow, WindowContainer, Workspace},
+    traits::{CommonGetters, PositionGetters, WindowGetters},
   };
+
+  fn reload_test_config(
+    selected_monitor: &str,
+    display_name: &str,
+    outer_gap: i32,
+  ) -> String {
+    format!(
+      r"
+side_areas:
+  left: 240px
+  right: 260px
+  match:
+    - device_name: {{ equals: {selected_monitor} }}
+gaps:
+  scale_with_dpi: false
+  inner_gap: 7px
+  outer_gap:
+    top: {outer_gap}px
+    right: {outer_gap}px
+    bottom: {outer_gap}px
+    left: {outer_gap}px
+window_effects:
+  focused_window:
+    border:
+      enabled: true
+window_rules:
+  - commands: ['move --side-area left']
+    match:
+      - window_process: {{ equals: left-widget }}
+  - commands: ['move --side-area right']
+    match:
+      - window_process: {{ equals: right-widget }}
+workspaces:
+  - name: '1'
+    display_name: {display_name}
+"
+    )
+  }
+
+  fn assert_window_rule_state(
+    window: &WindowContainer,
+    expected_side: Option<SideArea>,
+    regular_workspace: &Workspace,
+  ) {
+    if let Some(side) = expected_side {
+      assert_eq!(
+        window
+          .workspace()
+          .and_then(|workspace| workspace.side_area()),
+        Some(side)
+      );
+      assert_eq!(window.done_window_rules().len(), 1);
+    } else {
+      assert_eq!(
+        window.workspace().map(|workspace| workspace.id()),
+        Some(regular_workspace.id())
+      );
+      assert_eq!(window.done_window_rules().len(), 0);
+    }
+  }
+
+  fn assert_monitor_side_areas(monitor: &Monitor, enabled: bool) {
+    assert_eq!(monitor.side_area(SideArea::Left).is_some(), enabled);
+    assert_eq!(monitor.side_area(SideArea::Right).is_some(), enabled);
+  }
+
+  struct RuleMonitorFixture {
+    monitor: Monitor,
+    workspace: Workspace,
+    left_window: TilingWindow,
+    right_window: TilingWindow,
+  }
+
+  impl RuleMonitorFixture {
+    fn new(device_name: &str) -> Self {
+      let left_window = TilingWindow::mock()
+        .process_name("left-widget".to_string())
+        .call();
+      let right_window = TilingWindow::mock()
+        .process_name("right-widget".to_string())
+        .call();
+      let workspace = Workspace::mock()
+        .tiling_containers(vec![
+          left_window.clone().into(),
+          right_window.clone().into(),
+        ])
+        .call();
+      let monitor = Monitor::mock()
+        .device_name(device_name.to_string())
+        .workspaces(vec![workspace.clone()])
+        .call();
+
+      Self {
+        monitor,
+        workspace,
+        left_window,
+        right_window,
+      }
+    }
+
+    fn assert_rule_state(&self, selected: bool) {
+      assert_monitor_side_areas(&self.monitor, selected);
+      assert_window_rule_state(
+        &self.left_window.clone().into(),
+        selected.then_some(SideArea::Left),
+        &self.workspace,
+      );
+      assert_window_rule_state(
+        &self.right_window.clone().into(),
+        selected.then_some(SideArea::Right),
+        &self.workspace,
+      );
+    }
+  }
+
+  struct ReloadRulesFixture {
+    state: WmState,
+    config: UserConfig,
+    config_path: std::path::PathBuf,
+    monitors: [RuleMonitorFixture; 2],
+  }
+
+  impl ReloadRulesFixture {
+    fn new() -> Self {
+      let monitors = [
+        RuleMonitorFixture::new("DISPLAY1"),
+        RuleMonitorFixture::new("DISPLAY2"),
+      ];
+      let (event_tx, _event_rx) = mpsc::unbounded_channel();
+      let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
+      let state = WmState::new(Dispatcher::mock(), event_tx, exit_tx);
+      for fixture in &monitors {
+        attach_container(
+          &fixture.monitor.clone().into(),
+          &state.root_container.clone().into(),
+          None,
+        )
+        .unwrap();
+      }
+      set_focused_descendant(
+        &monitors[0].left_window.clone().into(),
+        None,
+      );
+
+      let config_path = std::env::temp_dir().join(format!(
+        "glazewm-reload-rules-test-{}.yaml",
+        Uuid::new_v4()
+      ));
+      let mut config = UserConfig::mock();
+      config.path = config_path.clone();
+
+      Self {
+        state,
+        config,
+        config_path,
+        monitors,
+      }
+    }
+
+    fn reload(
+      &mut self,
+      selected_monitor: &str,
+      display_name: &str,
+      outer_gap: i32,
+    ) {
+      self.state.pending_sync.clear();
+      fs::write(
+        &self.config_path,
+        reload_test_config(selected_monitor, display_name, outer_gap),
+      )
+      .unwrap();
+      reload_config(&mut self.state, &mut self.config).unwrap();
+    }
+
+    fn assert_selected(&self, selected_index: usize) {
+      for (index, fixture) in self.monitors.iter().enumerate() {
+        fixture.assert_rule_state(index == selected_index);
+      }
+    }
+
+    fn assert_late_reload_updates(
+      &self,
+      display_name: &str,
+      outer_gap: f32,
+    ) {
+      for fixture in &self.monitors {
+        assert_eq!(
+          fixture.workspace.config().display_name.as_deref(),
+          Some(display_name)
+        );
+        assert_eq!(fixture.workspace.outer_gaps().top.amount, outer_gap);
+        assert_eq!(fixture.workspace.outer_gaps().right.amount, outer_gap);
+      }
+      assert!(
+        self
+          .config
+          .value
+          .window_effects
+          .focused_window
+          .border
+          .enabled
+      );
+      #[cfg(target_os = "windows")]
+      assert!(self.state.pending_sync.needs_all_effects_update());
+    }
+
+    fn area_ids(&self, monitor_index: usize) -> [Uuid; 2] {
+      let monitor = &self.monitors[monitor_index].monitor;
+      [
+        monitor.side_area(SideArea::Left).unwrap().id(),
+        monitor.side_area(SideArea::Right).unwrap().id(),
+      ]
+    }
+
+    fn cleanup(&self) {
+      fs::remove_file(&self.config_path).unwrap();
+    }
+  }
 
   #[test]
   fn reload_removes_side_areas_from_nonmatching_monitor() {
@@ -263,5 +481,30 @@ workspaces:
 
     assert!(monitor.side_area(SideArea::Left).is_none());
     assert_eq!(workspace.to_rect().unwrap().width(), 1680);
+  }
+
+  #[test]
+  fn reload_moves_side_area_rules_between_selected_monitors_consistently()
+  {
+    let mut fixture = ReloadRulesFixture::new();
+
+    fixture.reload("DISPLAY1", "first", 11);
+    fixture.assert_selected(0);
+
+    fixture.reload("DISPLAY2", "second", 17);
+    fixture.assert_selected(1);
+    fixture.assert_late_reload_updates("second", 17.0);
+
+    let second_area_ids = fixture.area_ids(1);
+    fixture.reload("DISPLAY2", "second", 17);
+    fixture.assert_selected(1);
+    assert_eq!(fixture.area_ids(1), second_area_ids);
+    fixture.assert_late_reload_updates("second", 17.0);
+
+    fixture.reload("DISPLAY1", "third", 23);
+    fixture.assert_selected(0);
+    fixture.assert_late_reload_updates("third", 23.0);
+
+    fixture.cleanup();
   }
 }
