@@ -62,6 +62,12 @@ side_areas:
   left: '0px'
   right: '0px'
 
+  # Optionally restrict side areas to specific monitors. Omit `match` to
+  # enable them on every monitor. On Windows, use the `hardwareId` from
+  # `glazewm query monitors` to select a physical display.
+  # match:
+  #   - hardware_id: { equals: 'DEL439E' }
+
 window_effects:
   # Visual effects to apply to the focused window.
   focused_window:
