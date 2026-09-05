@@ -222,6 +222,7 @@ mod tests {
   };
 
   fn reload_test_config(
+    selector: &str,
     selected_monitor: &str,
     display_name: &str,
     outer_gap: i32,
@@ -232,7 +233,7 @@ side_areas:
   left: 240px
   right: 260px
   match:
-    - device_name: {{ equals: {selected_monitor} }}
+    - {selector}: {{ equals: {selected_monitor} }}
 gaps:
   scale_with_dpi: false
   inner_gap: 7px
@@ -462,7 +463,7 @@ workspaces:
   }
 
   impl RuleMonitorFixture {
-    fn new(device_name: &str) -> Self {
+    fn new(device_name: &str, hardware_id: &str) -> Self {
       let left_window = TilingWindow::mock()
         .process_name("left-widget".to_string())
         .call();
@@ -477,6 +478,7 @@ workspaces:
         .call();
       let monitor = Monitor::mock()
         .device_name(device_name.to_string())
+        .hardware_id(hardware_id.to_string())
         .workspaces(vec![workspace.clone()])
         .call();
 
@@ -1114,8 +1116,8 @@ workspaces:
   impl ReloadRulesFixture {
     fn new() -> Self {
       let monitors = [
-        RuleMonitorFixture::new("DISPLAY1"),
-        RuleMonitorFixture::new("DISPLAY2"),
+        RuleMonitorFixture::new("DISPLAY1", "DEL439E"),
+        RuleMonitorFixture::new("DISPLAY2", "ACR1234"),
       ];
       let (event_tx, _event_rx) = mpsc::unbounded_channel();
       let (exit_tx, _exit_rx) = mpsc::unbounded_channel();
@@ -1154,10 +1156,44 @@ workspaces:
       display_name: &str,
       outer_gap: i32,
     ) {
+      self.reload_with_selector(
+        "device_name",
+        selected_monitor,
+        display_name,
+        outer_gap,
+      );
+    }
+
+    fn reload_hardware_id(
+      &mut self,
+      hardware_id: &str,
+      display_name: &str,
+      outer_gap: i32,
+    ) {
+      self.reload_with_selector(
+        "hardware_id",
+        hardware_id,
+        display_name,
+        outer_gap,
+      );
+    }
+
+    fn reload_with_selector(
+      &mut self,
+      selector: &str,
+      selected_monitor: &str,
+      display_name: &str,
+      outer_gap: i32,
+    ) {
       self.state.pending_sync.clear();
       fs::write(
         &self.config_path,
-        reload_test_config(selected_monitor, display_name, outer_gap),
+        reload_test_config(
+          selector,
+          selected_monitor,
+          display_name,
+          outer_gap,
+        ),
       )
       .unwrap();
       reload_config(&mut self.state, &mut self.config).unwrap();
@@ -1201,6 +1237,12 @@ workspaces:
         monitor.side_area(SideArea::Left).unwrap().id(),
         monitor.side_area(SideArea::Right).unwrap().id(),
       ]
+    }
+
+    fn assert_area_ids_absent(&self, area_ids: [Uuid; 2]) {
+      assert!(area_ids
+        .iter()
+        .all(|id| self.state.container_by_id(*id).is_none()));
     }
 
     fn cleanup(&self) {
@@ -1272,6 +1314,29 @@ workspaces:
 
     fixture.reload("DISPLAY1", "third", 23);
     fixture.assert_selected(0);
+    fixture.assert_late_reload_updates("third", 23.0);
+
+    fixture.cleanup();
+  }
+
+  #[test]
+  fn reload_tracks_side_areas_by_hardware_id() {
+    let mut fixture = ReloadRulesFixture::new();
+
+    fixture.reload_hardware_id("DEL439E", "first", 11);
+    fixture.assert_selected(0);
+    let first_area_ids = fixture.area_ids(0);
+    fixture.assert_late_reload_updates("first", 11.0);
+
+    fixture.reload_hardware_id("ACR1234", "second", 17);
+    fixture.assert_selected(1);
+    fixture.assert_area_ids_absent(first_area_ids);
+    let second_area_ids = fixture.area_ids(1);
+    fixture.assert_late_reload_updates("second", 17.0);
+
+    fixture.reload_hardware_id("DEL439E", "third", 23);
+    fixture.assert_selected(0);
+    fixture.assert_area_ids_absent(second_area_ids);
     fixture.assert_late_reload_updates("third", 23.0);
 
     fixture.cleanup();

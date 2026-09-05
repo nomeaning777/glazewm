@@ -100,23 +100,75 @@ impl Default for SideAreasConfig {
 }
 
 impl SideAreasConfig {
-  /// Whether side areas are enabled for the given monitor device name.
+  /// Whether side areas are enabled for the given monitor properties.
   #[must_use]
-  pub fn matches_monitor(&self, device_name: &str) -> bool {
+  pub fn matches_monitor(
+    &self,
+    device_name: &str,
+    hardware_id: Option<&str>,
+  ) -> bool {
     self.match_monitor.as_ref().is_none_or(|match_configs| {
-      match_configs
-        .iter()
-        .any(|match_config| match_config.device_name.is_match(device_name))
+      match_configs.iter().any(|match_config| {
+        match_config.matches_monitor(device_name, hardware_id)
+      })
     })
   }
 }
 
 /// Match conditions for selecting a monitor.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all(serialize = "camelCase"))]
+#[serde(
+  rename_all(serialize = "camelCase"),
+  try_from = "RawMonitorMatchConfig"
+)]
 pub struct MonitorMatchConfig {
-  /// Match condition for the monitor's display device name.
-  pub device_name: MatchType,
+  /// Match condition for the monitor's logical display adapter name.
+  pub device_name: Option<MatchType>,
+
+  /// Match condition for the monitor's hardware ID.
+  pub hardware_id: Option<MatchType>,
+}
+
+impl MonitorMatchConfig {
+  /// Whether all configured conditions match the monitor properties.
+  fn matches_monitor(
+    &self,
+    device_name: &str,
+    hardware_id: Option<&str>,
+  ) -> bool {
+    self
+      .device_name
+      .as_ref()
+      .is_none_or(|matcher| matcher.is_match(device_name))
+      && self.hardware_id.as_ref().is_none_or(|matcher| {
+        hardware_id.is_some_and(|value| matcher.is_match(value))
+      })
+  }
+}
+
+#[derive(Deserialize)]
+struct RawMonitorMatchConfig {
+  #[serde(default)]
+  device_name: Option<MatchType>,
+  #[serde(default)]
+  hardware_id: Option<MatchType>,
+}
+
+impl TryFrom<RawMonitorMatchConfig> for MonitorMatchConfig {
+  type Error = &'static str;
+
+  fn try_from(value: RawMonitorMatchConfig) -> Result<Self, Self::Error> {
+    if value.device_name.is_none() && value.hardware_id.is_none() {
+      return Err(
+        "at least one of `device_name` or `hardware_id` is required",
+      );
+    }
+
+    Ok(Self {
+      device_name: value.device_name,
+      hardware_id: value.hardware_id,
+    })
+  }
 }
 
 /// Identifies one of the persistent side areas on a monitor.
@@ -583,9 +635,117 @@ side_areas:
     )
     .unwrap();
 
-    assert!(parsed.side_areas.matches_monitor("DISPLAY1"));
-    assert!(parsed.side_areas.matches_monitor("Studio Display"));
-    assert!(!parsed.side_areas.matches_monitor("DISPLAY2"));
+    assert!(parsed.side_areas.matches_monitor("DISPLAY1", None));
+    assert!(parsed.side_areas.matches_monitor("Studio Display", None));
+    assert!(!parsed.side_areas.matches_monitor("DISPLAY2", None));
+  }
+
+  #[test]
+  fn parses_side_area_hardware_id_match() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  left: 15%
+  right: 15%
+  match:
+    - hardware_id: { equals: DEL439E }
+",
+    )
+    .unwrap();
+
+    assert!(parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY1", Some("DEL439E")));
+    assert!(!parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY1", Some("ACR1234")));
+  }
+
+  #[test]
+  fn side_area_match_fields_are_anded_and_entries_are_ored() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match:
+    - device_name: { equals: '\\.\DISPLAY1' }
+      hardware_id: { equals: DEL439E }
+    - hardware_id: { regex: '^APP' }
+",
+    )
+    .unwrap();
+
+    assert!(parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY1", Some("DEL439E")));
+    assert!(!parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY1", Some("ACR1234")));
+    assert!(!parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY2", Some("DEL439E")));
+    assert!(parsed
+      .side_areas
+      .matches_monitor(r"\\.\DISPLAY2", Some("APP5678")));
+  }
+
+  #[test]
+  fn missing_hardware_id_never_matches_hardware_condition() {
+    let parsed = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match:
+    - hardware_id: { not_equals: SAM0001 }
+",
+    )
+    .unwrap();
+
+    assert!(!parsed.side_areas.matches_monitor("DISPLAY1", None));
+    assert!(parsed
+      .side_areas
+      .matches_monitor("DISPLAY1", Some("DEL439E")));
+    assert!(!parsed
+      .side_areas
+      .matches_monitor("DISPLAY1", Some("SAM0001")));
+  }
+
+  #[test]
+  fn hardware_id_uses_existing_match_types() {
+    for (matcher, matching_id, other_id) in [
+      ("{ equals: DEL439E }", "DEL439E", "ACR1234"),
+      ("{ includes: '439' }", "DEL439E", "ACR1234"),
+      ("{ regex: '^DEL[0-9A-Z]+$' }", "DEL439E", "ACR1234"),
+      ("{ not_equals: ACR1234 }", "DEL439E", "ACR1234"),
+      ("{ not_regex: '^ACR' }", "DEL439E", "ACR1234"),
+    ] {
+      let parsed = serde_yaml::from_str::<ParsedConfig>(&format!(
+        "side_areas:\n  match:\n    - hardware_id: {matcher}\n"
+      ))
+      .unwrap();
+
+      assert!(parsed
+        .side_areas
+        .matches_monitor("DISPLAY1", Some(matching_id)));
+      assert!(!parsed
+        .side_areas
+        .matches_monitor("DISPLAY1", Some(other_id)));
+    }
+  }
+
+  #[test]
+  fn rejects_empty_side_area_monitor_match() {
+    let result = serde_yaml::from_str::<ParsedConfig>(
+      r"
+side_areas:
+  match:
+    - {}
+",
+    );
+
+    let error = result.unwrap_err().to_string();
+    assert!(
+      error.contains("at least one of `device_name` or `hardware_id`"),
+      "{error}"
+    );
   }
 
   #[test]
@@ -593,8 +753,8 @@ side_areas:
     let parsed =
       serde_yaml::from_str::<ParsedConfig>("side_areas: {}").unwrap();
 
-    assert!(parsed.side_areas.matches_monitor("DISPLAY1"));
-    assert!(parsed.side_areas.matches_monitor("Studio Display"));
+    assert!(parsed.side_areas.matches_monitor("DISPLAY1", None));
+    assert!(parsed.side_areas.matches_monitor("Studio Display", None));
   }
 
   #[test]
@@ -607,7 +767,7 @@ side_areas:
     )
     .unwrap();
 
-    assert!(!parsed.side_areas.matches_monitor("DISPLAY1"));
+    assert!(!parsed.side_areas.matches_monitor("DISPLAY1", None));
   }
 
   #[test]

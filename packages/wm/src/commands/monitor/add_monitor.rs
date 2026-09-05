@@ -51,10 +51,11 @@ pub fn ensure_side_areas(
   state: &WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  let matches_monitor = config
-    .value
-    .side_areas
-    .matches_monitor(&monitor.native_properties().device_name);
+  let native_properties = monitor.native_properties();
+  let matches_monitor = config.value.side_areas.matches_monitor(
+    &native_properties.device_name,
+    native_properties.hardware_id.as_deref(),
+  );
 
   for (side, width) in [
     (SideArea::Left, config.value.side_areas.left.clone()),
@@ -324,6 +325,47 @@ side_areas:
     assert!(selected_monitor.side_area(SideArea::Left).is_some());
     assert!(other_monitor.side_area(SideArea::Left).is_none());
     assert_eq!(selected_workspace.to_rect().unwrap().width(), 1380);
+    assert_eq!(other_workspace.to_rect().unwrap().width(), 1680);
+  }
+
+  #[test]
+  fn enables_side_areas_only_for_matching_hardware_ids() {
+    let selected_workspace = Workspace::mock().call();
+    let selected_monitor = Monitor::mock()
+      .device_name(r"\\.\DISPLAY1".to_string())
+      .hardware_id("DEL439E".to_string())
+      .workspaces(vec![selected_workspace.clone()])
+      .call();
+    let other_workspace = Workspace::mock().call();
+    let other_monitor = Monitor::mock()
+      .device_name(r"\\.\DISPLAY2".to_string())
+      .hardware_id("ACR1234".to_string())
+      .workspaces(vec![other_workspace.clone()])
+      .call();
+    let state = state_with_monitors(vec![
+      selected_monitor.clone(),
+      other_monitor.clone(),
+    ]);
+    let mut config = UserConfig::mock();
+    config.value = serde_yaml::from_str(
+      r"
+side_areas:
+  left: 300px
+  right: 20%
+  match:
+    - hardware_id: { equals: DEL439E }
+",
+    )
+    .unwrap();
+
+    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+
+    assert!(selected_monitor.side_area(SideArea::Left).is_some());
+    assert!(selected_monitor.side_area(SideArea::Right).is_some());
+    assert!(other_monitor.side_area(SideArea::Left).is_none());
+    assert!(other_monitor.side_area(SideArea::Right).is_none());
+    assert_eq!(selected_workspace.to_rect().unwrap().width(), 1044);
     assert_eq!(other_workspace.to_rect().unwrap().width(), 1680);
   }
 

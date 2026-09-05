@@ -138,6 +138,7 @@ impl Monitor {
   #[builder]
   pub fn mock(
     #[builder(default = String::new())] device_name: String,
+    hardware_id: Option<String>,
     #[builder(default = mock_bounds())] bounds: Rect,
     #[builder(default = mock_working_area())] working_area: Rect,
     #[builder(default = MOCK_DPI)] dpi: u32,
@@ -147,6 +148,7 @@ impl Monitor {
   ) -> Self {
     let properties = NativeMonitorProperties::mock()
       .device_name(device_name)
+      .maybe_hardware_id(hardware_id)
       .bounds(bounds)
       .working_area(working_area)
       .dpi(dpi)
@@ -169,6 +171,7 @@ impl NativeMonitorProperties {
   #[builder]
   pub fn mock(
     #[builder(default = String::new())] device_name: String,
+    hardware_id: Option<String>,
     #[builder(default = mock_bounds())] bounds: Rect,
     #[builder(default = mock_working_area())] working_area: Rect,
     #[builder(default = MOCK_DPI)] dpi: u32,
@@ -176,6 +179,7 @@ impl NativeMonitorProperties {
   ) -> Self {
     Self {
       device_name,
+      hardware_id,
       bounds,
       working_area,
       dpi,
@@ -184,8 +188,6 @@ impl NativeMonitorProperties {
       device_uuid: String::new(),
       #[cfg(target_os = "windows")]
       handle: 0,
-      #[cfg(target_os = "windows")]
-      hardware_id: None,
       #[cfg(target_os = "windows")]
       device_path: None,
     }

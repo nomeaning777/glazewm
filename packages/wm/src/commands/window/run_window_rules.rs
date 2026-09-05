@@ -946,9 +946,10 @@ workspaces:
 
     config.value.side_areas.match_monitor =
       Some(vec![MonitorMatchConfig {
-        device_name: MatchType::Equals {
+        device_name: Some(MatchType::Equals {
           equals: "DISPLAY2".to_string(),
-        },
+        }),
+        hardware_id: None,
       }]);
     ensure_side_areas(&target_monitor, &state, &config).unwrap();
     ensure_side_areas(&other_monitor, &state, &config).unwrap();

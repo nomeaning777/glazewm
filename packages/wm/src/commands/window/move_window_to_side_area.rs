@@ -22,10 +22,14 @@ pub fn move_window_to_side_area(
     window.workspace().context("Window has no workspace.")?;
   let monitor = window.monitor().context("Window has no monitor.")?;
   let target_area = monitor.side_area(side).with_context(|| {
-    let device_name = monitor.native_properties().device_name;
+    let native_properties = monitor.native_properties();
+    let device_name = native_properties.device_name;
     let side_areas = &config.value.side_areas;
 
-    if side_areas.matches_monitor(&device_name) {
+    if side_areas.matches_monitor(
+      &device_name,
+      native_properties.hardware_id.as_deref(),
+    ) {
       let configured_width = match side {
         SideArea::Left => &side_areas.left,
         SideArea::Right => &side_areas.right,
@@ -262,9 +266,10 @@ mod tests {
     let mut config = UserConfig::mock();
     config.value.side_areas.match_monitor =
       Some(vec![wm_common::MonitorMatchConfig {
-        device_name: wm_common::MatchType::Equals {
+        device_name: Some(wm_common::MatchType::Equals {
           equals: "DISPLAY1".to_string(),
-        },
+        }),
+        hardware_id: None,
       }]);
     let error = move_window_to_side_area(
       window.clone().into(),

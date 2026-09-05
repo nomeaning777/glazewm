@@ -264,10 +264,11 @@ side_areas:
   left: "300px"
   right: "20%"
 
-  # 可选的显示器选择条件。各项之间为“或”关系；省略 `match` 时应用于所有显示器。
-  # 可运行 `glazewm query monitors` 查看输出中的 `deviceName`。
+  # 可选的显示器选择条件。各项之间为“或”关系，同一项内的字段为“与”关系。
+  # 省略 `match` 时应用于所有显示器。在 Windows 上，`glazewm query monitors`
+  # 输出中的 `hardwareId` 用于标识物理显示器。
   match:
-    - device_name: { equals: "Your Display Name" }
+    - hardware_id: { equals: "DEL439E" }
 
 window_rules:
   - commands: ["move --side-area left"]
@@ -280,7 +281,11 @@ window_rules:
 窗口规则相同的 `equals`、`includes`、`regex`、`not_equals` 和 `not_regex`
 匹配类型。未匹配的显示器会保留完整的普通工作区宽度。如果窗口规则无法使用
 所请求的侧边区域，其中的命令都不会执行，该规则会保持待执行状态。交互式执行
-同一命令时，如果目标侧边区域不可用，则会返回错误。
+同一命令时，如果目标侧边区域不可用，则会返回错误。在 Windows 上，可用
+`hardware_id` 选择物理显示器。没有硬件 ID 的显示器（包括无法获取该值的平台）
+不会匹配 `hardware_id` 条件。`device_name` 匹配逻辑显示适配器名称（输出中的
+`deviceName`，例如 `\\.\DISPLAY1`）；连接布局变化时，该名称可能随之改变。每个
+选择条件至少需要包含这两个字段中的一个。
 
 ### 配置：窗口规则
 
