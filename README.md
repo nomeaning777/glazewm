@@ -274,9 +274,10 @@ workspaces:
 ### Config: Persistent side areas
 
 Persistent side areas reserve independent tiling space on the left and/or
-right of every monitor. Windows moved there remain visible while switching
-regular workspaces on that monitor. Side areas respect `gaps.outer_gap`, so
-top and bottom gaps can reserve space for bars such as YASB.
+right of every monitor by default. Windows moved there remain visible while
+switching regular workspaces on that monitor. Side areas respect
+`gaps.outer_gap`, so top and bottom gaps can reserve space for bars such as
+YASB.
 
 ```yaml
 side_areas:
@@ -287,6 +288,12 @@ side_areas:
   left: "300px"
   right: "20%"
 
+  # Optional monitor selectors. Entries are ORed, while fields in the same
+  # entry are ANDed. Omit `match` to apply to every monitor. On Windows,
+  # `hardwareId` from `glazewm query monitors` identifies a physical display.
+  match:
+    - hardware_id: { equals: "DEL439E" }
+
 window_rules:
   - commands: ["move --side-area left"]
     match:
@@ -296,6 +303,18 @@ window_rules:
 Windows can also be moved interactively with
 `move --side-area left|right`. Side areas use a vertical tiling direction
 and are not part of the regular workspace activation/deactivation cycle.
+Monitor selectors support the same `equals`, `includes`, `regex`,
+`not_equals`, and `not_regex` match types as window rules. A monitor that
+does not match keeps its full regular workspace width. If a window rule
+cannot use its requested side area, none of its commands are applied and
+the rule remains pending. Invoking the same command interactively returns
+an error when the requested area is unavailable. On Windows, use
+`hardware_id` to select a physical display. A monitor without a hardware ID,
+including platforms where one is unavailable, does not match a
+`hardware_id` condition. `device_name` matches the logical display adapter
+name (`deviceName`, for example `\\.\DISPLAY1`), which can change when the
+display connection layout changes. Each selector must contain at least one
+of these fields.
 
 ### Config: Window rules
 

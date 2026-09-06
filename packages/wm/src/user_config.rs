@@ -382,7 +382,10 @@ impl UserConfig {
 #[cfg(test)]
 impl UserConfig {
   pub fn mock() -> Self {
-    let value = ParsedConfig::default();
+    Self::mock_with_value(ParsedConfig::default())
+  }
+
+  pub fn mock_with_value(value: ParsedConfig) -> Self {
     let window_rules_by_event = Self::window_rules_by_event(&value);
 
     Self {

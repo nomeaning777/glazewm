@@ -180,10 +180,7 @@ impl Monitor {
       device_path: self.native_properties().device_path,
       #[cfg(not(target_os = "windows"))]
       device_path: None,
-      #[cfg(target_os = "windows")]
       hardware_id: self.native_properties().hardware_id,
-      #[cfg(not(target_os = "windows"))]
-      hardware_id: None,
       working_rect: self.native_properties().working_area,
     }))
   }

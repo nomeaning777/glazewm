@@ -3,6 +3,10 @@ name: Build
 on:
   workflow_call:
     inputs:
+      artifact_retention_days:
+        type: number
+        default: 0
+        description: Days to retain build artifacts. 0 uses the repository default.
       enable_ui_access:
         type: boolean
         default: false
@@ -61,13 +65,23 @@ jobs:
           UPLOAD_DIR="temp/$SOURCE_DIR"
           mkdir -p "$UPLOAD_DIR"
 
-          # Move build artifacts. Suppress errors for missing platform-specific binaries.
-          mv "$SOURCE_DIR"/glazewm{,-cli} \
-            "$SOURCE_DIR"/glazewm{,-cli,-watcher}.exe \
-            "$UPLOAD_DIR/" 2>/dev/null || true
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BINARIES=(glazewm.exe glazewm-cli.exe glazewm-watcher.exe)
+          else
+            BINARIES=(glazewm glazewm-cli)
+          fi
+
+          for BINARY in "${BINARIES[@]}"; do
+            if [[ ! -s "$SOURCE_DIR/$BINARY" ]]; then
+              echo "::error::Missing or empty build output: $SOURCE_DIR/$BINARY"
+              exit 1
+            fi
+            cp "$SOURCE_DIR/$BINARY" "$UPLOAD_DIR/"
+          done
 
       - uses: actions/upload-artifact@v6
         with:
           if-no-files-found: error
           name: build-${{ matrix.target }}
           path: temp
+          retention-days: ${{ inputs.artifact_retention_days }}

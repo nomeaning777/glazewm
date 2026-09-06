@@ -1,6 +1,6 @@
 use anyhow::Context;
 use tracing::info;
-use wm_common::WindowState;
+use wm_common::{InvokeMoveCommand, WindowState};
 
 use crate::{
   commands::{
@@ -12,6 +12,36 @@ use crate::{
   user_config::UserConfig,
   wm_state::WmState,
 };
+
+/// Gets the workspace target selected by a `move` command, if any.
+///
+/// Directional tree moves and side-area moves are handled separately.
+#[must_use]
+pub(crate) fn workspace_target_from_move_command(
+  command: &InvokeMoveCommand,
+) -> Option<WorkspaceTarget> {
+  if let Some(direction) = &command.workspace_in_direction {
+    Some(WorkspaceTarget::Direction(direction.clone()))
+  } else if let Some(name) = &command.workspace {
+    Some(WorkspaceTarget::Name(name.clone()))
+  } else if command.next_active_workspace {
+    Some(WorkspaceTarget::NextActive)
+  } else if command.prev_active_workspace {
+    Some(WorkspaceTarget::PreviousActive)
+  } else if command.next_workspace {
+    Some(WorkspaceTarget::Next)
+  } else if command.prev_workspace {
+    Some(WorkspaceTarget::Previous)
+  } else if command.recent_workspace {
+    Some(WorkspaceTarget::Recent)
+  } else if command.next_active_workspace_on_monitor {
+    Some(WorkspaceTarget::NextActiveInMonitor)
+  } else if command.prev_active_workspace_on_monitor {
+    Some(WorkspaceTarget::PreviousActiveInMonitor)
+  } else {
+    None
+  }
+}
 
 #[allow(clippy::too_many_lines)]
 pub fn move_window_to_workspace(
