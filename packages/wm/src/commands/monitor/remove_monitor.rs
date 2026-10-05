@@ -2,14 +2,14 @@ use anyhow::Context;
 use tracing::info;
 use wm_common::{SideArea, WmEvent};
 
-use super::move_side_area_contents;
+use super::hide_side_area;
 use crate::{
   commands::{
     container::{detach_container, move_container_within_tree},
     workspace::sort_workspaces,
   },
-  models::Monitor,
-  traits::{CommonGetters, PositionGetters, WindowGetters},
+  models::{Monitor, Workspace},
+  traits::CommonGetters,
   user_config::UserConfig,
   wm_state::WmState,
 };
@@ -28,28 +28,17 @@ pub fn remove_monitor(
     .find(|m| m.id() != monitor.id())
     .context("No target monitor to move workspaces.")?;
 
-  // Side areas are monitor-local, so move their contents into the
-  // corresponding area on the remaining monitor.
-  for side in [SideArea::Left, SideArea::Right] {
-    let Some(source_area) = monitor.side_area(side) else {
-      continue;
-    };
-    let target_parent = target_monitor
-      .side_area(side)
-      .or_else(|| target_monitor.displayed_workspace())
-      .context("No target region for side-area windows.")?;
-
-    let moved_windows =
-      move_side_area_contents(&source_area, &target_parent, state)?;
-    for window in moved_windows {
-      window.set_has_pending_dpi_adjustment(true);
-      window.set_floating_placement(
-        window
-          .floating_placement()
-          .translate_to_center(&target_parent.to_rect()?),
-      );
-    }
-    detach_container(source_area.into())?;
+  // Retain both active and previously hidden areas under a live monitor.
+  // Their windows remain managed, but only an explicit move can reveal
+  // them.
+  let side_areas = monitor
+    .children()
+    .into_iter()
+    .filter_map(|child| child.as_workspace().cloned())
+    .filter(Workspace::is_side_area)
+    .collect::<Vec<_>>();
+  for area in side_areas {
+    hide_side_area(&area, &target_monitor, state)?;
   }
 
   // Avoid moving empty workspaces.
@@ -87,101 +76,106 @@ pub fn remove_monitor(
 
 #[cfg(test)]
 mod tests {
-  use wm_common::GapsConfig;
   use wm_platform::Rect;
 
   use super::*;
   use crate::{
-    models::Workspace,
+    commands::container::set_focused_descendant,
+    models::TilingWindow,
     test_utils::{
       assert_tree_links_and_focus_order, mixed_side_area,
       state_with_monitors,
     },
+    traits::WindowGetters,
   };
 
   #[test]
-  fn removal_evacuates_mixed_side_area_children_in_both_orders() {
-    for split_first in [false, true] {
-      let (source_area, split, windows) =
-        mixed_side_area(SideArea::Left, split_first);
-      let source_workspace = Workspace::mock().call();
-      let source_monitor = Monitor::mock()
-        .device_name("SOURCE".to_string())
-        .dpi(96)
-        .workspaces(vec![source_area.clone(), source_workspace])
-        .call();
+  fn disappearing_side_area_stays_hidden_and_managed_on_monitor_removal() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for split_first in [false, true] {
+        for target_has_area in [false, true] {
+          let (source_area, split, windows) =
+            mixed_side_area(side, split_first);
+          let regular_window = TilingWindow::mock().call();
+          let source_workspace = Workspace::mock()
+            .tiling_containers(vec![regular_window.clone().into()])
+            .call();
+          let source_monitor = Monitor::mock()
+            .device_name("SOURCE".to_string())
+            .workspaces(vec![
+              source_area.clone(),
+              source_workspace.clone(),
+            ])
+            .call();
+          let target_workspace = Workspace::mock().call();
+          let target_area = Workspace::mock_side_area().side(side).call();
+          let mut target_workspaces = vec![target_workspace.clone()];
+          if target_has_area {
+            target_workspaces.push(target_area.clone());
+          }
+          let target_monitor = Monitor::mock()
+            .device_name("TARGET".to_string())
+            .bounds(Rect::from_xy(1680, 0, 1920, 1080))
+            .working_area(Rect::from_xy(1680, 0, 1920, 1040))
+            .dpi(144)
+            .workspaces(target_workspaces)
+            .call();
+          let mut state = state_with_monitors(vec![
+            source_monitor.clone(),
+            target_monitor.clone(),
+          ]);
+          set_focused_descendant(&windows[0].clone().into(), None);
+          let child_order = source_area.children();
+          let focus_order = source_area.borrow_child_focus_order().clone();
 
-      let target_workspace =
-        Workspace::mock().gaps_config(GapsConfig::default()).call();
-      let target_area = (!split_first)
-        .then(|| Workspace::mock_side_area().side(SideArea::Left).call());
-      let mut target_workspaces = vec![target_workspace.clone()];
-      if let Some(target_area) = &target_area {
-        target_workspaces.insert(0, target_area.clone());
-      }
-      let target_monitor = Monitor::mock()
-        .device_name("TARGET".to_string())
-        .bounds(Rect::from_xy(1680, 0, 1920, 1080))
-        .working_area(Rect::from_xy(1680, 0, 1920, 1040))
-        .dpi(144)
-        .workspaces(target_workspaces)
-        .call();
-      let mut state = state_with_monitors(vec![
-        source_monitor.clone(),
-        target_monitor.clone(),
-      ]);
-      let expected_workspace = target_area.unwrap_or(target_workspace);
-      let target_rect = expected_workspace.to_rect().unwrap();
-      let expected_placements = windows
-        .iter()
-        .map(|window| {
-          window
-            .floating_placement()
-            .translate_to_center(&target_rect)
-        })
-        .collect::<Vec<_>>();
+          remove_monitor(
+            source_monitor.clone(),
+            &mut state,
+            &UserConfig::mock(),
+          )
+          .unwrap();
 
-      remove_monitor(
-        source_monitor.clone(),
-        &mut state,
-        &UserConfig::mock(),
-      )
-      .unwrap();
-
-      assert!(source_monitor.is_detached());
-      assert!(state
-        .monitors()
-        .iter()
-        .all(|monitor| { monitor.id() != source_monitor.id() }));
-      assert!(state.root_container.descendants().all(|container| {
-        container.id() != source_area.id()
-          && container.id() != source_monitor.id()
-      }));
-      assert!(source_area.is_detached());
-      assert!(!source_area.has_children());
-      assert!(source_area.borrow_child_focus_order().is_empty());
-      if split.is_detached() {
-        assert!(!split.has_children());
-      } else {
-        assert_eq!(
-          split.workspace().map(|workspace| workspace.id()),
-          Some(expected_workspace.id())
-        );
+          assert!(!source_area.is_displayed());
+          assert!(!source_area.is_detached());
+          assert!(source_monitor.is_detached());
+          assert!(state.container_by_id(source_monitor.id()).is_none());
+          assert_eq!(source_area.children(), child_order);
+          assert_eq!(*source_area.borrow_child_focus_order(), focus_order);
+          assert!(!split.is_detached());
+          assert_eq!(target_monitor.workspaces().len(), 2);
+          assert_eq!(
+            target_monitor.side_area(side).map(|area| area.id()),
+            target_has_area.then_some(target_area.id())
+          );
+          assert!(!target_area.has_children());
+          assert_eq!(
+            regular_window.workspace().unwrap().id(),
+            source_workspace.id()
+          );
+          assert_eq!(
+            source_workspace.monitor().unwrap().id(),
+            target_monitor.id()
+          );
+          for window in windows {
+            assert_eq!(window.workspace().unwrap().id(), source_area.id());
+            assert_eq!(
+              window.monitor().unwrap().id(),
+              target_monitor.id()
+            );
+            assert!(state.container_by_id(window.id()).is_some());
+            assert!(window.has_pending_dpi_adjustment());
+          }
+          assert!(state
+            .focused_container()
+            .unwrap()
+            .workspace()
+            .unwrap()
+            .is_displayed());
+          assert_tree_links_and_focus_order(
+            &state.root_container.clone().into(),
+          );
+        }
       }
-      for (window, expected_placement) in
-        windows.into_iter().zip(expected_placements)
-      {
-        assert_eq!(
-          window.workspace().map(|workspace| workspace.id()),
-          Some(expected_workspace.id())
-        );
-        assert!(window.has_pending_dpi_adjustment());
-        assert_eq!(window.floating_placement(), expected_placement);
-      }
-      assert_tree_links_and_focus_order(
-        &state.root_container.clone().into(),
-      );
-      assert_tree_links_and_focus_order(&source_monitor.clone().into());
     }
   }
 }

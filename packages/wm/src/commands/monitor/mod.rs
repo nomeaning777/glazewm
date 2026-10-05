@@ -1,13 +1,13 @@
 mod add_monitor;
 mod focus_monitor;
-mod move_side_area_contents;
+mod hide_side_area;
 mod remove_monitor;
 mod sort_monitors;
 mod update_monitor;
 
 pub use add_monitor::*;
 pub use focus_monitor::*;
-use move_side_area_contents::move_side_area_contents;
+use hide_side_area::hide_side_area;
 pub use remove_monitor::*;
 pub use sort_monitors::*;
 pub use update_monitor::*;

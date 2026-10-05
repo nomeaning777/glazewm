@@ -490,7 +490,21 @@ workspaces:
       }
     }
 
-    fn assert_rule_state(&self, selected: bool) {
+    fn assert_rule_state(&self, selected: bool, hidden: bool) {
+      if hidden {
+        assert_monitor_side_areas(&self.monitor, selected);
+        for (window, side) in [
+          (&self.left_window, SideArea::Left),
+          (&self.right_window, SideArea::Right),
+        ] {
+          let area = window.workspace().unwrap();
+          assert_eq!(area.side_area(), Some(side));
+          assert!(!area.is_displayed());
+          assert!(area.is_hidden_side_area());
+          assert_eq!(window.done_window_rules().len(), 0);
+        }
+        return;
+      }
       assert_monitor_side_areas(&self.monitor, selected);
       assert_window_rule_state(
         &self.left_window.clone().into(),
@@ -1096,15 +1110,22 @@ workspaces:
       ]
     }
 
-    /// Asserts removed side-area IDs are absent from the tree.
-    fn assert_area_ids_absent(&self, area_ids: [Uuid; 2]) {
-      let current_ids = self
-        .state
-        .root_container
-        .self_and_descendants()
-        .map(|container| container.id())
-        .collect::<std::collections::HashSet<_>>();
-      assert!(area_ids.iter().all(|id| !current_ids.contains(id)));
+    fn assert_area_ids_unavailable(&self, area_ids: [Uuid; 2]) {
+      for id in area_ids {
+        if let Some(area) = self.state.container_by_id(id) {
+          assert!(area.as_workspace().unwrap().is_hidden_side_area());
+          assert!(!area.as_workspace().unwrap().is_displayed());
+        }
+      }
+    }
+
+    fn assert_hidden(&self, window_index: usize, area_id: Uuid) {
+      let window = &self.windows[window_index];
+      let area = window.workspace().unwrap();
+      assert_eq!(area.id(), area_id);
+      assert!(area.is_hidden_side_area());
+      assert!(!area.is_displayed());
+      assert_eq!(window.done_window_rules().len(), 0);
     }
 
     /// Removes the temporary config file.
@@ -1199,9 +1220,9 @@ workspaces:
       reload_config(&mut self.state, &mut self.config).unwrap();
     }
 
-    fn assert_selected(&self, selected_index: usize) {
+    fn assert_selected(&self, selected_index: usize, hidden: [bool; 2]) {
       for (index, fixture) in self.monitors.iter().enumerate() {
-        fixture.assert_rule_state(index == selected_index);
+        fixture.assert_rule_state(index == selected_index, hidden[index]);
       }
     }
 
@@ -1239,10 +1260,15 @@ workspaces:
       ]
     }
 
-    fn assert_area_ids_absent(&self, area_ids: [Uuid; 2]) {
-      assert!(area_ids
-        .iter()
-        .all(|id| self.state.container_by_id(*id).is_none()));
+    fn assert_area_ids_unavailable(&self, area_ids: [Uuid; 2]) {
+      assert!(area_ids.iter().all(|id| self
+        .state
+        .container_by_id(*id)
+        .is_some_and(|area| {
+          area.as_workspace().is_some_and(|area| {
+            area.is_hidden_side_area() && !area.is_displayed()
+          })
+        })));
     }
 
     fn cleanup(&self) {
@@ -1300,20 +1326,20 @@ workspaces:
     let mut fixture = ReloadRulesFixture::new();
 
     fixture.reload("DISPLAY1", "first", 11);
-    fixture.assert_selected(0);
+    fixture.assert_selected(0, [false, false]);
 
     fixture.reload("DISPLAY2", "second", 17);
-    fixture.assert_selected(1);
+    fixture.assert_selected(1, [true, false]);
     fixture.assert_late_reload_updates("second", 17.0);
 
     let second_area_ids = fixture.area_ids(1);
     fixture.reload("DISPLAY2", "second", 17);
-    fixture.assert_selected(1);
+    fixture.assert_selected(1, [true, false]);
     assert_eq!(fixture.area_ids(1), second_area_ids);
     fixture.assert_late_reload_updates("second", 17.0);
 
     fixture.reload("DISPLAY1", "third", 23);
-    fixture.assert_selected(0);
+    fixture.assert_selected(0, [true, true]);
     fixture.assert_late_reload_updates("third", 23.0);
 
     fixture.cleanup();
@@ -1324,19 +1350,19 @@ workspaces:
     let mut fixture = ReloadRulesFixture::new();
 
     fixture.reload_hardware_id("DEL439E", "first", 11);
-    fixture.assert_selected(0);
+    fixture.assert_selected(0, [false, false]);
     let first_area_ids = fixture.area_ids(0);
     fixture.assert_late_reload_updates("first", 11.0);
 
     fixture.reload_hardware_id("ACR1234", "second", 17);
-    fixture.assert_selected(1);
-    fixture.assert_area_ids_absent(first_area_ids);
+    fixture.assert_selected(1, [true, false]);
+    fixture.assert_area_ids_unavailable(first_area_ids);
     let second_area_ids = fixture.area_ids(1);
     fixture.assert_late_reload_updates("second", 17.0);
 
     fixture.reload_hardware_id("DEL439E", "third", 23);
-    fixture.assert_selected(0);
-    fixture.assert_area_ids_absent(second_area_ids);
+    fixture.assert_selected(0, [true, true]);
+    fixture.assert_area_ids_unavailable(second_area_ids);
     fixture.assert_late_reload_updates("third", 23.0);
 
     fixture.cleanup();
@@ -1354,6 +1380,7 @@ workspaces:
       fixture.assert_late_reload_updates("first", 11.0);
 
       let display_1_area_ids = fixture.area_ids(0);
+      let first_hidden_id = fixture.windows[1].workspace().unwrap().id();
       fixture.reload("DISPLAY1", "second", 17);
       fixture.assert_selected_monitor(0);
       fixture.assert_deferred(0, 0);
@@ -1364,23 +1391,24 @@ workspaces:
       fixture.reload("DISPLAY2", "third", 23);
       fixture.assert_selected_monitor(1);
       fixture.assert_completed(0);
-      fixture.assert_deferred(1, 0);
-      fixture.assert_area_ids_absent(display_1_area_ids);
+      fixture.assert_hidden(1, first_hidden_id);
+      fixture.assert_area_ids_unavailable(display_1_area_ids);
       fixture.assert_late_reload_updates("third", 23.0);
 
       let display_2_area_ids = fixture.area_ids(1);
+      let second_hidden_id = fixture.windows[0].workspace().unwrap().id();
       fixture.reload("DISPLAY2", "fourth", 29);
       fixture.assert_selected_monitor(1);
       fixture.assert_completed(0);
-      fixture.assert_deferred(1, 0);
+      fixture.assert_hidden(1, first_hidden_id);
       assert_eq!(fixture.area_ids(1), display_2_area_ids);
       fixture.assert_late_reload_updates("fourth", 29.0);
 
       fixture.reload("DISPLAY1", "fifth", 31);
       fixture.assert_selected_monitor(0);
-      fixture.assert_deferred(0, 1);
-      fixture.assert_completed(1);
-      fixture.assert_area_ids_absent(display_2_area_ids);
+      fixture.assert_hidden(0, second_hidden_id);
+      fixture.assert_hidden(1, first_hidden_id);
+      fixture.assert_area_ids_unavailable(display_2_area_ids);
       fixture.assert_late_reload_updates("fifth", 31.0);
 
       fixture.cleanup();

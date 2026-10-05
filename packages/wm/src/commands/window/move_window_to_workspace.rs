@@ -63,8 +63,19 @@ pub fn move_window_to_workspace(
   let current_monitor =
     current_workspace.monitor().context("No monitor.")?;
 
-  let (target_workspace_name, target_workspace) =
-    state.workspace_by_target(&current_workspace, target, config)?;
+  let (target_workspace_name, target_workspace) = match target {
+    // A hidden sidebar is not the displayed regular workspace. A named
+    // recovery move must work even when that workspace is already focused.
+    WorkspaceTarget::Name(name)
+      if containing_workspace.is_hidden_side_area() =>
+    {
+      let workspace = state.workspace_by_name(&name);
+      (Some(name), workspace)
+    }
+    target => {
+      state.workspace_by_target(&current_workspace, target, config)?
+    }
+  };
 
   // Retrieve or activate the target workspace by its name.
   let target_workspace = match target_workspace {

@@ -79,7 +79,10 @@ impl Monitor {
       .children()
       .into_iter()
       .filter_map(|container| container.as_workspace().cloned())
-      .find(|workspace| workspace.side_area() == Some(side))
+      .find(|workspace| {
+        workspace.side_area() == Some(side)
+          && !workspace.is_hidden_side_area()
+      })
   }
 
   /// Whether either persistent side area is enabled on this monitor.

@@ -206,16 +206,19 @@ side_areas:
     assert!(!selected_monitor.has_side_areas());
     assert!(initial_area_ids
       .iter()
-      .all(|id| state.container_by_id(*id).is_none()));
-    for window in [&left_window, &right_window] {
+      .all(|id| state.container_by_id(*id).is_some()));
+    for (window, area) in
+      [(&left_window, &left_area), (&right_window, &right_area)]
+    {
+      assert!(!area.is_displayed());
       assert_eq!(
         window.workspace().map(|workspace| workspace.id()),
-        Some(selected_workspace.id())
+        Some(area.id())
       );
     }
     assert_eq!(
       state.focused_container().map(|container| container.id()),
-      Some(left_window.id())
+      Some(selected_workspace.id())
     );
     assert_tree_links_and_focus_order(
       &state.root_container.clone().into(),
@@ -233,7 +236,7 @@ side_areas:
     assert!(selected_monitor.side_area(SideArea::Right).is_some());
     assert!(initial_area_ids
       .iter()
-      .all(|id| state.container_by_id(*id).is_none()));
+      .all(|id| state.container_by_id(*id).is_some()));
     assert_tree_links_and_focus_order(
       &state.root_container.clone().into(),
     );
