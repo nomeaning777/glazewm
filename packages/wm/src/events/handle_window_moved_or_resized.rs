@@ -367,6 +367,16 @@ pub fn update_floating_window_position(
   nearest_monitor: &Monitor,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
+  // Native position changes must not recover a disappeared sidebar's
+  // windows. Redraw to reapply hiding without changing their placement.
+  if window
+    .workspace()
+    .is_some_and(|area| area.is_hidden_side_area())
+  {
+    state.pending_sync.queue_container_to_redraw(window.clone());
+    return Ok(());
+  }
+
   tracing::info!(
     "Updating floating window position: {}",
     window.as_window_container()?
@@ -543,9 +553,168 @@ fn is_in_corner(window_frame: &Rect, monitor_rect: &Rect) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use wm_common::SideArea;
   use wm_platform::Rect;
 
-  use super::is_in_corner;
+  use super::*;
+  use crate::{
+    commands::{
+      monitor::{ensure_side_areas, remove_monitor},
+      window::move_window_to_workspace,
+    },
+    models::{Workspace, WorkspaceTarget},
+    test_utils::{assert_tree_links_and_focus_order, state_with_monitors},
+  };
+
+  fn assert_hidden_sidebar_retains_floating_window(
+    side: SideArea,
+    disconnect: bool,
+  ) {
+    let window = NonTilingWindow::mock().call();
+    let original_placement = window.floating_placement();
+    let area = Workspace::mock_side_area()
+      .side(side)
+      .non_tiling_windows(vec![window.clone()])
+      .call();
+    let source = Monitor::mock()
+      .workspaces(vec![area.clone(), Workspace::mock().call()])
+      .call();
+    let host = Monitor::mock()
+      .bounds(Rect::from_xy(1680, 0, 1680, 1050))
+      .working_area(Rect::from_xy(1680, 0, 1680, 1000))
+      .workspaces(vec![Workspace::mock().name("2".to_string()).call()])
+      .call();
+    let destination = Workspace::mock().name("3".to_string()).call();
+    let other = Monitor::mock()
+      .bounds(Rect::from_xy(3360, 0, 1680, 1050))
+      .working_area(Rect::from_xy(3360, 0, 1680, 1000))
+      .workspaces(vec![destination.clone()])
+      .call();
+    let mut state = state_with_monitors(vec![
+      source.clone(),
+      host.clone(),
+      other.clone(),
+    ]);
+    let config = UserConfig::mock();
+    if disconnect {
+      remove_monitor(source.clone(), &mut state, &config).unwrap();
+      assert!(state.container_by_id(source.id()).is_none());
+    } else {
+      // Both configured sidebar widths default to zero.
+      ensure_side_areas(&source, &mut state, &config).unwrap();
+    }
+    let retained_monitor = if disconnect { host } else { source };
+    let focused_before = state.focused_container();
+
+    for display_state in [DisplayState::Hidden, DisplayState::Hiding] {
+      for nearest_monitor in [&other, &retained_monitor] {
+        window.set_display_state(display_state.clone());
+        state.pending_sync.clear();
+        update_floating_window_position(
+          &window,
+          Rect::from_xy(3500, 100, 300, 200),
+          nearest_monitor,
+          &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(window.workspace().unwrap().id(), area.id());
+        assert_eq!(window.monitor().unwrap().id(), retained_monitor.id());
+        assert!(!area.is_displayed());
+        assert_eq!(window.display_state(), display_state);
+        assert_eq!(window.floating_placement(), original_placement);
+        assert!(matches!(window.state(), WindowState::Floating(_)));
+        assert_eq!(state.windows().len(), 1);
+        assert!(state.container_by_id(window.id()).is_some());
+        assert!(state
+          .windows_to_redraw()
+          .contains(&window.clone().into()));
+        assert_eq!(state.focused_container(), focused_before);
+        assert!(!destination.has_children());
+        assert_tree_links_and_focus_order(
+          &state.root_container.clone().into(),
+        );
+      }
+    }
+
+    // Explicit recovery must still move the same managed window.
+    let id = window.id();
+    move_window_to_workspace(
+      window.clone().into(),
+      WorkspaceTarget::Name("3".to_string()),
+      &mut state,
+      &config,
+    )
+    .unwrap();
+    assert_eq!(window.id(), id);
+    assert_eq!(window.workspace().unwrap().id(), destination.id());
+    assert!(destination.is_displayed());
+    assert!(!area.has_children());
+    assert_eq!(state.windows().len(), 1);
+    assert!(state.windows_to_redraw().contains(&window.into()));
+    assert_tree_links_and_focus_order(
+      &state.root_container.clone().into(),
+    );
+  }
+
+  #[test]
+  fn hidden_left_sidebar_retains_floating_window_after_zero_width() {
+    assert_hidden_sidebar_retains_floating_window(SideArea::Left, false);
+  }
+
+  #[test]
+  fn hidden_right_sidebar_retains_floating_window_after_zero_width() {
+    assert_hidden_sidebar_retains_floating_window(SideArea::Right, false);
+  }
+
+  #[test]
+  fn hidden_left_sidebar_retains_floating_window_after_disconnect() {
+    assert_hidden_sidebar_retains_floating_window(SideArea::Left, true);
+  }
+
+  #[test]
+  fn hidden_right_sidebar_retains_floating_window_after_disconnect() {
+    assert_hidden_sidebar_retains_floating_window(SideArea::Right, true);
+  }
+
+  #[test]
+  fn regular_floating_window_follows_native_position_changes() {
+    let window = NonTilingWindow::mock().call();
+    let source_workspace = Workspace::mock()
+      .non_tiling_windows(vec![window.clone()])
+      .call();
+    let source = Monitor::mock()
+      .workspaces(vec![source_workspace.clone()])
+      .call();
+    let destination = Workspace::mock().name("2".to_string()).call();
+    let other = Monitor::mock()
+      .bounds(Rect::from_xy(1680, 0, 1680, 1050))
+      .working_area(Rect::from_xy(1680, 0, 1680, 1000))
+      .workspaces(vec![destination.clone()])
+      .call();
+    let mut state =
+      state_with_monitors(vec![source.clone(), other.clone()]);
+
+    for (monitor, workspace, frame) in [
+      (source, source_workspace, Rect::from_xy(100, 100, 300, 200)),
+      (other, destination, Rect::from_xy(1800, 100, 300, 200)),
+    ] {
+      update_floating_window_position(
+        &window,
+        frame.clone(),
+        &monitor,
+        &mut state,
+      )
+      .unwrap();
+      assert_eq!(window.workspace().unwrap().id(), workspace.id());
+      assert!(workspace.is_displayed());
+      assert_eq!(window.floating_placement(), frame);
+      assert!(window.has_custom_floating_placement());
+      assert_tree_links_and_focus_order(
+        &state.root_container.clone().into(),
+      );
+    }
+  }
 
   #[test]
   fn matches_corner_positions() {
