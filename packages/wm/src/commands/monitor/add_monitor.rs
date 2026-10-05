@@ -3,12 +3,10 @@ use tracing::info;
 use wm_common::{SideArea, WindowState, WmEvent};
 use wm_platform::Display;
 
-use super::move_side_area_contents;
+use super::hide_side_area;
 use crate::{
   commands::{
-    container::{
-      attach_container, detach_container, move_container_within_tree,
-    },
+    container::{attach_container, move_container_within_tree},
     workspace::{activate_workspace, sort_workspaces},
   },
   models::{Monitor, NativeMonitorProperties, Workspace},
@@ -48,7 +46,7 @@ pub fn add_monitor(
 /// Creates, updates, or removes persistent side areas for a monitor.
 pub fn ensure_side_areas(
   monitor: &Monitor,
-  state: &WmState,
+  state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
   let native_properties = monitor.native_properties();
@@ -65,13 +63,7 @@ pub fn ensure_side_areas(
 
     if !matches_monitor || width.amount <= 0.0 {
       if let Some(area) = existing {
-        if area.has_children() {
-          let target_workspace = monitor
-            .displayed_workspace()
-            .context("No target workspace for side-area windows.")?;
-          move_side_area_contents(&area, &target_workspace, state)?;
-        }
-        detach_container(area.into())?;
+        hide_side_area(&area, monitor, state)?;
       }
       continue;
     }
@@ -105,6 +97,12 @@ pub fn ensure_side_areas(
       .descendants()
       .filter_map(|container| container.as_window_container().ok())
     {
+      if window
+        .workspace()
+        .is_some_and(|area| area.is_hidden_side_area())
+      {
+        continue;
+      }
       if let WindowState::Fullscreen(mut fullscreen) = window.state() {
         fullscreen.maximized = false;
         window.set_state(WindowState::Fullscreen(fullscreen));
@@ -248,7 +246,7 @@ mod tests {
     state_with_monitors(vec![monitor])
   }
 
-  fn assert_side_area_contents_evacuated(
+  fn assert_side_area_contents_hidden(
     side: SideArea,
     split_first: bool,
     monitor_name: &str,
@@ -264,28 +262,20 @@ mod tests {
       .device_name(monitor_name.to_string())
       .workspaces(vec![side_area.clone(), regular_workspace.clone()])
       .call();
-    let state = state_with_monitor(monitor.clone());
+    let mut state = state_with_monitor(monitor.clone());
 
-    ensure_side_areas(&monitor, &state, config).unwrap();
+    ensure_side_areas(&monitor, &mut state, config).unwrap();
 
     assert!(monitor.side_area(side).is_none());
-    assert!(side_area.is_detached());
-    assert!(!side_area.has_children());
-    assert!(side_area.borrow_child_focus_order().is_empty());
-    if split.is_detached() {
-      assert!(!split.has_children());
-    } else {
-      assert_eq!(
-        split.workspace().map(|workspace| workspace.id()),
-        Some(regular_workspace.id())
-      );
-    }
+    assert!(!side_area.is_displayed());
+    assert!(!side_area.is_detached());
+    assert_eq!(regular_workspace.child_count(), 1);
+    assert!(!split.is_detached());
+    assert_eq!(split.workspace().unwrap().id(), side_area.id());
     for window in windows {
-      assert_eq!(
-        window.workspace().map(|workspace| workspace.id()),
-        Some(regular_workspace.id())
-      );
+      assert_eq!(window.workspace().unwrap().id(), side_area.id());
       assert!(!window.has_pending_dpi_adjustment());
+      assert!(state.container_by_id(window.id()).is_some());
     }
     assert_tree_links_and_focus_order(
       &state.root_container.clone().into(),
@@ -304,7 +294,7 @@ mod tests {
       .device_name("DISPLAY2".to_string())
       .workspaces(vec![other_workspace.clone()])
       .call();
-    let state = state_with_monitors(vec![
+    let mut state = state_with_monitors(vec![
       selected_monitor.clone(),
       other_monitor.clone(),
     ]);
@@ -319,8 +309,8 @@ side_areas:
     )
     .unwrap();
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
 
     assert!(selected_monitor.side_area(SideArea::Left).is_some());
     assert!(other_monitor.side_area(SideArea::Left).is_none());
@@ -342,7 +332,7 @@ side_areas:
       .hardware_id("ACR1234".to_string())
       .workspaces(vec![other_workspace.clone()])
       .call();
-    let state = state_with_monitors(vec![
+    let mut state = state_with_monitors(vec![
       selected_monitor.clone(),
       other_monitor.clone(),
     ]);
@@ -358,8 +348,8 @@ side_areas:
     )
     .unwrap();
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
 
     assert!(selected_monitor.side_area(SideArea::Left).is_some());
     assert!(selected_monitor.side_area(SideArea::Right).is_some());
@@ -370,7 +360,7 @@ side_areas:
   }
 
   #[test]
-  fn disabling_side_area_moves_contents_back_and_flattens_layout() {
+  fn disabling_side_area_preserves_split_layout() {
     let first = TilingWindow::mock().call();
     let second = TilingWindow::mock().call();
     let split = SplitContainer::mock()
@@ -378,23 +368,27 @@ side_areas:
       .call();
     let side_area = Workspace::mock_side_area()
       .side(SideArea::Left)
-      .tiling_containers(vec![split.into()])
+      .tiling_containers(vec![split.clone().into()])
       .call();
     let regular_workspace = Workspace::mock().call();
     let monitor = Monitor::mock()
       .workspaces(vec![side_area.clone(), regular_workspace.clone()])
       .call();
-    let state = state_with_monitor(monitor.clone());
+    let mut state = state_with_monitor(monitor.clone());
     let mut config = UserConfig::mock();
     config.value.side_areas.left = LengthValue::from_px(0);
 
-    ensure_side_areas(&monitor, &state, &config).unwrap();
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
 
     assert!(monitor.side_area(SideArea::Left).is_none());
+    assert!(!side_area.is_displayed());
+    assert!(!regular_workspace.has_children());
+    assert_eq!(side_area.children()[0].id(), split.id());
     assert_eq!(
-      regular_workspace
-        .tiling_children()
-        .map(|child| child.id())
+      split
+        .children()
+        .iter()
+        .map(CommonGetters::id)
         .collect::<Vec<_>>(),
       vec![first.id(), second.id()]
     );
@@ -412,22 +406,24 @@ side_areas:
     let regular_workspace =
       Workspace::mock().gaps_config(GapsConfig::default()).call();
     let monitor = Monitor::mock()
-      .workspaces(vec![regular_workspace.clone(), side_area])
+      .workspaces(vec![regular_workspace.clone(), side_area.clone()])
       .call();
-    let state = state_with_monitor(monitor.clone());
+    let mut state = state_with_monitor(monitor.clone());
     let mut config = UserConfig::mock();
     config.value.side_areas.right = LengthValue::from_px(0);
 
-    ensure_side_areas(&monitor, &state, &config).unwrap();
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
 
     assert_eq!(
       window.workspace().map(|workspace| workspace.id()),
-      Some(regular_workspace.id())
+      Some(side_area.id())
     );
+    assert!(!side_area.is_displayed());
+    assert!(!regular_workspace.has_children());
   }
 
   #[test]
-  fn monitor_match_change_removes_stale_side_area() {
+  fn monitor_match_change_hides_stale_side_area() {
     let window = TilingWindow::mock().call();
     let side_area = Workspace::mock_side_area()
       .side(SideArea::Left)
@@ -436,9 +432,9 @@ side_areas:
     let regular_workspace = Workspace::mock().call();
     let monitor = Monitor::mock()
       .device_name("DISPLAY2".to_string())
-      .workspaces(vec![side_area, regular_workspace.clone()])
+      .workspaces(vec![side_area.clone(), regular_workspace.clone()])
       .call();
-    let state = state_with_monitor(monitor.clone());
+    let mut state = state_with_monitor(monitor.clone());
     let mut config = UserConfig::mock();
     config.value = serde_yaml::from_str(
       r"
@@ -450,15 +446,17 @@ side_areas:
     )
     .unwrap();
 
-    ensure_side_areas(&monitor, &state, &config).unwrap();
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
 
     assert!(monitor.side_area(SideArea::Left).is_none());
-    assert_eq!(window.workspace().unwrap().id(), regular_workspace.id());
+    assert_eq!(window.workspace().unwrap().id(), side_area.id());
+    assert!(!side_area.is_displayed());
+    assert!(!regular_workspace.has_children());
     assert_eq!(regular_workspace.to_rect().unwrap().width(), 1680);
   }
 
   #[test]
-  fn selector_change_evacuates_mixed_side_area_children_in_both_orders() {
+  fn selector_change_hides_mixed_side_area_children_in_both_orders() {
     let mut config = UserConfig::mock();
     config.value = serde_yaml::from_str(
       r"
@@ -471,7 +469,7 @@ side_areas:
     .unwrap();
 
     for split_first in [false, true] {
-      assert_side_area_contents_evacuated(
+      assert_side_area_contents_hidden(
         SideArea::Left,
         split_first,
         "DISPLAY2",
@@ -481,16 +479,42 @@ side_areas:
   }
 
   #[test]
-  fn zero_width_evacuates_mixed_side_area_children_in_both_orders() {
+  fn zero_width_hides_mixed_side_area_children_in_both_orders() {
     let config = UserConfig::mock();
 
     for split_first in [false, true] {
-      assert_side_area_contents_evacuated(
+      assert_side_area_contents_hidden(
         SideArea::Right,
         split_first,
         "DISPLAY1",
         &config,
       );
+    }
+  }
+
+  #[test]
+  fn disappearing_side_area_stays_hidden_after_reenable() {
+    for side in [SideArea::Left, SideArea::Right] {
+      let (area, _, windows) = mixed_side_area(side, false);
+      let regular = Workspace::mock().call();
+      let monitor = Monitor::mock()
+        .workspaces(vec![area.clone(), regular.clone()])
+        .call();
+      let mut state = state_with_monitor(monitor.clone());
+      let mut config = UserConfig::mock();
+      ensure_side_areas(&monitor, &mut state, &config).unwrap();
+      assert!(!area.is_displayed());
+      assert!(!area.is_detached());
+      assert!(!regular.has_children());
+      config.value.side_areas.left = LengthValue::from_px(300);
+      config.value.side_areas.right = LengthValue::from_px(300);
+      ensure_side_areas(&monitor, &mut state, &config).unwrap();
+      assert!(!area.is_displayed());
+      assert_ne!(monitor.side_area(side).unwrap().id(), area.id());
+      for window in windows {
+        assert_eq!(window.workspace().unwrap().id(), area.id());
+        assert!(state.container_by_id(window.id()).is_some());
+      }
     }
   }
 }

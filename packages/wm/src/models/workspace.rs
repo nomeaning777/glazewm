@@ -34,6 +34,7 @@ struct WorkspaceInner {
   gaps_config: GapsConfig,
   tiling_direction: TilingDirection,
   side_area: Option<SideArea>,
+  side_area_hidden: bool,
   side_area_width: LengthValue,
   side_area_scale_with_dpi: bool,
 }
@@ -53,6 +54,7 @@ impl Workspace {
       gaps_config,
       tiling_direction,
       side_area: None,
+      side_area_hidden: false,
       side_area_width: LengthValue::from_px(0),
       side_area_scale_with_dpi: true,
     };
@@ -94,7 +96,7 @@ impl Workspace {
   /// Whether the workspace is currently displayed by the parent monitor.
   pub fn is_displayed(&self) -> bool {
     if self.is_side_area() {
-      return self.monitor().is_some();
+      return !self.is_hidden_side_area() && self.monitor().is_some();
     }
 
     self
@@ -116,6 +118,18 @@ impl Workspace {
   /// workspace.
   pub fn is_side_area(&self) -> bool {
     self.side_area().is_some()
+  }
+
+  /// Whether this area's windows are retained after its sidebar
+  /// disappeared.
+  pub fn is_hidden_side_area(&self) -> bool {
+    self.0.borrow().side_area_hidden
+  }
+
+  /// Keeps the area managed without displaying it or accepting new
+  /// placements.
+  pub fn hide_side_area(&self) {
+    self.0.borrow_mut().side_area_hidden = true;
   }
 
   /// Updates the configured width of this persistent side area.
