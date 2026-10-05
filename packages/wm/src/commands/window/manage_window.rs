@@ -186,12 +186,8 @@ fn create_window(
   let window_state =
     window_state_to_create(&native_properties, &nearest_monitor, config)?;
 
-  // Attach the new window as the first child of the target parent (if
-  // provided), otherwise, add as a sibling of the focused container.
-  let (target_parent, target_index) = match target_parent {
-    Some(parent) => (parent, 0),
-    None => insertion_target(&window_state, state)?,
-  };
+  let (target_parent, target_index) =
+    insertion_target(&window_state, target_parent, state)?;
 
   let target_workspace =
     target_parent.workspace().context("No target workspace.")?;
@@ -328,6 +324,8 @@ fn window_state_to_create(
 /// Gets where to insert a new window in the container tree.
 ///
 /// Rules:
+/// - Side areas redirect to their monitor's displayed main workspace.
+/// - Otherwise, a supplied target parent receives the window at index 0.
 /// - For non-tiling windows: Always append to the workspace.
 /// - For tiling windows:
 ///   1. Try to insert after the focused tiling window if one exists.
@@ -338,13 +336,31 @@ fn window_state_to_create(
 /// Returns tuple of (parent container, insertion index).
 fn insertion_target(
   window_state: &WindowState,
+  target_parent: Option<Container>,
   state: &WmState,
 ) -> anyhow::Result<(Container, usize)> {
-  let focused_container =
-    state.focused_container().context("No focused container.")?;
+  let has_target_parent = target_parent.is_some();
+  let focused_container = target_parent
+    .or_else(|| state.focused_container())
+    .context("No focused container.")?;
 
   let focused_workspace =
     focused_container.workspace().context("No workspace.")?;
+
+  // Only an explicit move (including a window rule) may enter a side
+  // area. Use the main workspace's focus history for automatic insertion.
+  let (focused_container, focused_workspace) =
+    if focused_workspace.is_side_area() {
+      let workspace = focused_workspace
+        .monitor()
+        .and_then(|monitor| monitor.displayed_workspace())
+        .context("No displayed main workspace on side area's monitor.")?;
+      (workspace.clone().into(), workspace)
+    } else if has_target_parent {
+      return Ok((focused_container, 0));
+    } else {
+      (focused_container, focused_workspace)
+    };
 
   // For tiling windows, try to find a suitable tiling window to insert
   // next to.
@@ -376,4 +392,362 @@ fn insertion_target(
     focused_workspace.clone().into(),
     focused_workspace.child_count(),
   ))
+}
+
+#[cfg(test)]
+mod tests {
+  use wm_common::{FloatingStateConfig, ParsedConfig, SideArea};
+
+  use super::*;
+  use crate::{
+    commands::window::move_window_to_side_area,
+    models::{SplitContainer, TabbedContainer, Workspace},
+    test_utils::{assert_tree_links_and_focus_order, state_with_monitors},
+  };
+
+  fn new_window_states() -> [WindowState; 2] {
+    [
+      WindowState::Tiling,
+      WindowState::Floating(FloatingStateConfig::default()),
+    ]
+  }
+
+  fn insert_mock_window(
+    window_state: &WindowState,
+    target_parent: Option<Container>,
+    state: &WmState,
+  ) -> WindowContainer {
+    let (parent, index) =
+      insertion_target(window_state, target_parent, state).unwrap();
+    let window: WindowContainer = if *window_state == WindowState::Tiling {
+      TilingWindow::mock()
+        .process_name("new-app".into())
+        .call()
+        .into()
+    } else {
+      NonTilingWindow::mock()
+        .state(window_state.clone())
+        .process_name("new-app".into())
+        .call()
+        .into()
+    };
+    attach_container(&window.clone().into(), &parent, Some(index))
+      .unwrap();
+    set_focused_descendant(&window.clone().into(), None);
+    assert_tree_links_and_focus_order(
+      &state.root_container.clone().into(),
+    );
+    assert_eq!(
+      state.focused_container().map(|focused| focused.id()),
+      Some(window.id())
+    );
+    window
+  }
+
+  fn workspace_with_layout(
+    layout: &str,
+  ) -> (Workspace, Container, TilingWindow, NonTilingWindow) {
+    let first = TilingWindow::mock().call();
+    let focused = TilingWindow::mock().call();
+    let last = TilingWindow::mock().call();
+    let floating = NonTilingWindow::mock().call();
+    let children = vec![first.into(), focused.clone().into(), last.into()];
+    let workspace = Workspace::mock()
+      .tiling_containers(match layout {
+        "split" => vec![SplitContainer::mock()
+          .tiling_containers(children)
+          .call()
+          .into()],
+        "tabbed" => vec![TabbedContainer::mock()
+          .tiling_containers(children)
+          .call()
+          .into()],
+        _ => children,
+      })
+      .non_tiling_windows(vec![floating.clone()])
+      .call();
+    let parent = focused.parent().unwrap();
+    (workspace, parent, focused, floating)
+  }
+
+  fn side_area_with_focus(
+    side: SideArea,
+    layout: &str,
+  ) -> (Workspace, Container) {
+    let window = TilingWindow::mock().call();
+    let floating = NonTilingWindow::mock().call();
+    let area = Workspace::mock_side_area()
+      .side(side)
+      .tiling_containers(match layout {
+        "split" => vec![SplitContainer::mock()
+          .tiling_containers(vec![window.clone().into()])
+          .call()
+          .into()],
+        "tabbed" => vec![TabbedContainer::mock()
+          .tiling_containers(vec![window.clone().into()])
+          .call()
+          .into()],
+        "empty" => vec![],
+        _ => vec![window.clone().into()],
+      })
+      .non_tiling_windows(if layout == "floating" {
+        vec![floating.clone()]
+      } else {
+        vec![]
+      })
+      .call();
+    let focused = match layout {
+      "floating" => floating.into(),
+      "empty" => area.clone().into(),
+      _ => window.into(),
+    };
+    (area, focused)
+  }
+
+  #[test]
+  fn sidebar_focus_inserts_into_displayed_main_workspace() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for side_layout in ["tiling", "split", "tabbed", "floating", "empty"]
+      {
+        for main_layout in ["tiling", "split", "tabbed"] {
+          for window_state in new_window_states() {
+            let (main, parent, last_focused, floating) =
+              workspace_with_layout(main_layout);
+            let (area, side_focus) =
+              side_area_with_focus(side, side_layout);
+            let hidden = Workspace::mock().name("hidden".into()).call();
+            let monitor = Monitor::mock()
+              .workspaces(vec![hidden.clone(), main.clone(), area.clone()])
+              .call();
+            let other_monitor = Monitor::mock()
+              .workspaces(vec![Workspace::mock()
+                .name("other".into())
+                .call()])
+              .call();
+            let state =
+              state_with_monitors(vec![other_monitor, monitor.clone()]);
+            set_focused_descendant(&last_focused.into(), None);
+            set_focused_descendant(&floating.into(), None);
+            set_focused_descendant(&side_focus, None);
+            let side_children = area.children();
+            let main_child_count = main.child_count();
+
+            let window = insert_mock_window(&window_state, None, &state);
+
+            assert_eq!(
+              window.workspace().unwrap().id(),
+              main.id(),
+              "{side:?}, {side_layout}, {main_layout}, {window_state:?}"
+            );
+            if window_state == WindowState::Tiling {
+              assert_eq!(window.parent().unwrap().id(), parent.id());
+              assert_eq!(window.index(), 2);
+            } else {
+              assert_eq!(window.parent().unwrap().id(), main.id());
+              assert_eq!(window.index(), main_child_count);
+            }
+            assert_eq!(area.children(), side_children);
+            assert!(!hidden.has_children());
+            assert_eq!(
+              monitor.displayed_workspace().unwrap().id(),
+              main.id()
+            );
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn normal_workspace_focus_preserves_insertion_rules() {
+    for layout in ["tiling", "split", "tabbed"] {
+      for focus_floating in [false, true] {
+        for window_state in new_window_states() {
+          let (workspace, parent, focused, floating) =
+            workspace_with_layout(layout);
+          let monitor =
+            Monitor::mock().workspaces(vec![workspace.clone()]).call();
+          let state = state_with_monitors(vec![monitor]);
+          set_focused_descendant(&focused.into(), None);
+          if focus_floating {
+            set_focused_descendant(&floating.into(), None);
+          }
+          let child_count = workspace.child_count();
+
+          let window = insert_mock_window(&window_state, None, &state);
+
+          if window_state == WindowState::Tiling {
+            assert_eq!(window.parent().unwrap().id(), parent.id());
+            assert_eq!(window.index(), 2);
+          } else {
+            assert_eq!(window.parent().unwrap().id(), workspace.id());
+            assert_eq!(window.index(), child_count);
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn sidebar_focus_with_empty_main_workspace_appends_to_main() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for window_state in new_window_states() {
+        let main = Workspace::mock().call();
+        let (area, focused) = side_area_with_focus(side, "tabbed");
+        let monitor =
+          Monitor::mock().workspaces(vec![main.clone(), area]).call();
+        let state = state_with_monitors(vec![monitor]);
+        set_focused_descendant(&focused, None);
+
+        let window = insert_mock_window(&window_state, None, &state);
+
+        assert_eq!(window.parent().unwrap().id(), main.id());
+        assert_eq!(window.index(), 0);
+      }
+    }
+  }
+
+  #[test]
+  fn side_area_target_parent_uses_its_own_monitors_main_workspace() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for layout in ["tiling", "split", "tabbed", "floating", "empty"] {
+        for window_state in new_window_states() {
+          let (main, parent, focused, _) = workspace_with_layout("tabbed");
+          let (area, side_focus) = side_area_with_focus(side, layout);
+          let monitor = Monitor::mock()
+            .workspaces(vec![main.clone(), area.clone()])
+            .call();
+          let other_workspace =
+            Workspace::mock().name("other".into()).call();
+          let other_monitor = Monitor::mock()
+            .workspaces(vec![other_workspace.clone()])
+            .call();
+          let state =
+            state_with_monitors(vec![other_monitor, monitor.clone()]);
+          set_focused_descendant(&focused.into(), None);
+          set_focused_descendant(&other_workspace.clone().into(), None);
+          let target_parent = if layout == "split" || layout == "tabbed" {
+            side_focus.parent().unwrap()
+          } else {
+            area.clone().into()
+          };
+          let side_children = area.children();
+
+          let window =
+            insert_mock_window(&window_state, Some(target_parent), &state);
+
+          assert_eq!(window.workspace().unwrap().id(), main.id());
+          if window_state == WindowState::Tiling {
+            assert_eq!(window.parent().unwrap().id(), parent.id());
+            assert_eq!(window.index(), 2);
+          } else {
+            assert_eq!(window.parent().unwrap().id(), main.id());
+          }
+          assert_eq!(area.children(), side_children);
+          assert!(!other_workspace.has_children());
+          assert_eq!(
+            monitor.displayed_workspace().unwrap().id(),
+            main.id()
+          );
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn regular_target_parent_preserves_prepend_behavior() {
+    for layout in ["tiling", "split", "tabbed"] {
+      let (workspace, parent, _, _) = workspace_with_layout(layout);
+      let (area, focused) = side_area_with_focus(SideArea::Left, "tiling");
+      let monitor =
+        Monitor::mock().workspaces(vec![workspace, area]).call();
+      let state = state_with_monitors(vec![monitor]);
+      set_focused_descendant(&focused, None);
+
+      let window = insert_mock_window(
+        &WindowState::Tiling,
+        Some(parent.clone()),
+        &state,
+      );
+
+      assert_eq!(window.parent().unwrap().id(), parent.id());
+      assert_eq!(window.index(), 0);
+    }
+  }
+
+  #[test]
+  fn missing_main_workspace_cannot_fall_back_to_side_area() {
+    let (area, focused) = side_area_with_focus(SideArea::Left, "tiling");
+    let monitor = Monitor::mock().workspaces(vec![area.clone()]).call();
+    let state = state_with_monitors(vec![monitor]);
+    set_focused_descendant(&focused, None);
+
+    for target_parent in [None, Some(area.into())] {
+      assert!(insertion_target(
+        &WindowState::Tiling,
+        target_parent,
+        &state
+      )
+      .is_err());
+    }
+  }
+
+  #[test]
+  fn explicit_moves_and_manage_rules_can_still_enter_side_areas() {
+    for side in [SideArea::Left, SideArea::Right] {
+      for use_rule in [false, true] {
+        for window_state in new_window_states() {
+          let main = Workspace::mock().call();
+          let (area, focused) = side_area_with_focus(side, "tiling");
+          let monitor = Monitor::mock()
+            .workspaces(vec![main.clone(), area.clone()])
+            .call();
+          let mut state = state_with_monitors(vec![monitor.clone()]);
+          set_focused_descendant(&focused, None);
+          let window = insert_mock_window(&window_state, None, &state);
+          assert_eq!(window.workspace().unwrap().id(), main.id());
+
+          if use_rule {
+            let side_name = if side == SideArea::Left {
+              "left"
+            } else {
+              "right"
+            };
+            let parsed = serde_yaml::from_str::<ParsedConfig>(&format!(
+              "window_rules:\n  - commands: ['move --side-area {side_name}']\n    match:\n      - window_process: {{ equals: new-app }}\nworkspaces:\n  - name: '1'\n"
+            )).unwrap();
+            let mut config = UserConfig::mock_with_value(parsed);
+            let updated = run_window_rules(
+              window.clone(),
+              &WindowRuleEvent::Manage,
+              &mut state,
+              &mut config,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(updated.id(), window.id());
+          } else {
+            move_window_to_side_area(
+              window.clone(),
+              side,
+              &mut state,
+              &UserConfig::mock(),
+            )
+            .unwrap();
+          }
+
+          assert_eq!(window.workspace().unwrap().id(), area.id());
+          assert_eq!(window.state(), window_state);
+          assert_eq!(
+            monitor.displayed_workspace().unwrap().id(),
+            main.id()
+          );
+          assert_eq!(state.focused_container().unwrap().id(), window.id());
+          assert_tree_links_and_focus_order(
+            &state.root_container.clone().into(),
+          );
+        }
+      }
+    }
+  }
 }
