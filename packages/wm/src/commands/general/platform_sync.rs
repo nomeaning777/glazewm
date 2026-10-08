@@ -850,4 +850,179 @@ mod tests {
     assert!(!items[0].is_active);
     assert!(items[1].is_active);
   }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  #[allow(clippy::too_many_lines)]
+  fn tab_visibility_notifications_converge_after_background_show() {
+    use wm_platform::NativeWindow;
+
+    use crate::{
+      commands::{
+        container::{attach_container, focus_tab, set_focused_descendant},
+        window::update_window_state,
+      },
+      events::{
+        handle_window_destroyed, handle_window_focused,
+        handle_window_hidden, handle_window_shown,
+      },
+      models::{Monitor, Workspace},
+      test_utils::{
+        assert_tree_links_and_focus_order, state_with_monitors,
+      },
+    };
+
+    for hide_method in [HideMethod::Hide, HideMethod::Cloak] {
+      let first = TilingWindow::mock()
+        .native(NativeWindow::from_handle(-100))
+        .call();
+      let background = TilingWindow::mock().call();
+      let first_native = first.native().clone();
+      let background_native = background.native().clone();
+      let tabbed = TabbedContainer::mock()
+        .tiling_containers(vec![first.clone().into()])
+        .call();
+      let workspace = Workspace::mock()
+        .tiling_containers(vec![tabbed.clone().into()])
+        .call();
+      let mut state = state_with_monitors(vec![Monitor::mock()
+        .workspaces(vec![workspace])
+        .call()]);
+      let mut config = UserConfig::mock();
+      config.value.general.hide_method = hide_method;
+
+      // Start after the native manageability/property checks: manage
+      // attaches the new tab, selects it, and queues a redraw and focus.
+      attach_container(
+        &background.clone().into(),
+        &tabbed.clone().into(),
+        Some(1),
+      )
+      .unwrap();
+      set_focused_descendant(&background.clone().into(), None);
+      state
+        .pending_sync
+        .queue_container_to_redraw(tabbed.clone())
+        .queue_focus_change();
+      redraw_containers(&background.clone().into(), &mut state, &config)
+        .unwrap();
+      state.pending_sync.clear();
+      handle_window_hidden(&first_native, &mut state, &config).unwrap();
+      handle_window_shown(
+        background_native.clone(),
+        &mut state,
+        &mut config,
+      )
+      .unwrap();
+      assert!(
+        !state.pending_sync.has_changes(),
+        "new tab's show acknowledgement must settle"
+      );
+
+      // A foreground notification returns to the existing tab. Native
+      // calls use invalid mock handles; notifications are supplied here.
+      handle_window_focused(&first_native, &mut state, &mut config)
+        .unwrap();
+      redraw_containers(&first.clone().into(), &mut state, &config)
+        .unwrap();
+      state.pending_sync.clear();
+      handle_window_shown(first_native.clone(), &mut state, &mut config)
+        .unwrap();
+      handle_window_hidden(&background_native, &mut state, &config)
+        .unwrap();
+      assert!(!state.pending_sync.has_changes());
+      let items = tab_bar_items(&tabbed);
+
+      for _ in 0..32 {
+        // An app shows its inactive tab. Sync must hide it once, while
+        // the active tab's repeated show notification must not resync
+        // the whole stack and issue another show/hide pair.
+        handle_window_shown(
+          background_native.clone(),
+          &mut state,
+          &mut config,
+        )
+        .unwrap();
+        assert!(state
+          .windows_to_redraw()
+          .contains(&background.clone().into()));
+        redraw_containers(&first.clone().into(), &mut state, &config)
+          .unwrap();
+        state.pending_sync.clear();
+        handle_window_shown(first_native.clone(), &mut state, &mut config)
+          .unwrap();
+        handle_window_hidden(&background_native, &mut state, &config)
+          .unwrap();
+        assert!(!state.pending_sync.has_changes());
+        assert_eq!(first.display_state(), DisplayState::Shown);
+        assert_eq!(background.display_state(), DisplayState::Hidden);
+        assert_eq!(state.focused_container().unwrap().id(), first.id());
+        assert_eq!(state.windows().len(), 2);
+        assert_eq!(tab_bar_items(&tabbed), items);
+        assert_tree_links_and_focus_order(
+          &state.root_container.clone().into(),
+        );
+      }
+
+      // An explicit tab switch must still reveal the background window.
+      focus_tab(&first.clone().into(), true, &mut state).unwrap();
+      redraw_containers(&background.clone().into(), &mut state, &config)
+        .unwrap();
+      state.pending_sync.clear();
+      handle_window_hidden(&first_native, &mut state, &config).unwrap();
+      handle_window_shown(
+        background_native.clone(),
+        &mut state,
+        &mut config,
+      )
+      .unwrap();
+      handle_window_shown(
+        background_native.clone(),
+        &mut state,
+        &mut config,
+      )
+      .unwrap();
+      assert!(!state.pending_sync.has_changes());
+      assert_eq!(state.focused_container().unwrap().id(), background.id());
+      assert_eq!(background.display_state(), DisplayState::Shown);
+
+      // Minimize/restore keeps the same identity and tab insertion target.
+      background.update_native_properties(|properties| {
+        properties.is_minimized = true;
+      });
+      let minimized = update_window_state(
+        background.clone().into(),
+        WindowState::Minimized,
+        &mut state,
+        &config,
+      )
+      .unwrap();
+      assert_eq!(minimized.id(), background.id());
+      assert_eq!(tabbed.child_count(), 1);
+      minimized.update_native_properties(|properties| {
+        properties.is_minimized = false;
+      });
+      let restored = update_window_state(
+        minimized,
+        WindowState::Tiling,
+        &mut state,
+        &config,
+      )
+      .unwrap();
+      assert_eq!(restored.id(), background.id());
+      assert_eq!(restored.parent().unwrap().id(), tabbed.id());
+      assert_eq!(state.windows().len(), 2);
+
+      handle_window_destroyed(background_native.id(), &mut state).unwrap();
+      assert_eq!(state.windows().len(), 1);
+      assert_eq!(tab_bar_items(&tabbed).len(), 1);
+      assert_eq!(state.focused_container().unwrap().id(), first.id());
+
+      // A genuine external hide of a shown window still unmanages it.
+      first.set_display_state(DisplayState::Shown);
+      handle_window_hidden(&first_native, &mut state, &config).unwrap();
+      assert_eq!(state.windows().len(), 0);
+      assert!(tabbed.is_detached());
+    }
+  }
 }

@@ -133,6 +133,13 @@ pub trait CommonGetters {
 
     Box::new(std::iter::from_fn(move || {
       while let Some(current) = stack.pop() {
+        if current
+          .as_workspace()
+          .is_some_and(Workspace::is_hidden_side_area)
+        {
+          continue;
+        }
+
         // Get containers that have no children. Descendant also cannot be
         // the container itself.
         if current.id() != self.id() && !current.has_children() {

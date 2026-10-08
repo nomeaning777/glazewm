@@ -24,6 +24,15 @@ pub fn run_window_rules(
   state: &mut WmState,
   config: &mut UserConfig,
 ) -> anyhow::Result<Option<WindowContainer>> {
+  // A disappeared sidebar stays hidden until the user explicitly moves
+  // its windows. Reload, title, and focus rules must not recover them.
+  if window
+    .workspace()
+    .is_some_and(|area| area.is_hidden_side_area())
+  {
+    return Ok(Some(window));
+  }
+
   let pending_window_rules =
     config.pending_window_rules(&window, event_type);
 
@@ -911,8 +920,8 @@ workspaces:
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
 
-    ensure_side_areas(&target_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&target_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
 
     run_window_rules(
       target_window.clone().into(),
@@ -951,8 +960,8 @@ workspaces:
         }),
         hardware_id: None,
       }]);
-    ensure_side_areas(&target_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&target_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
     run_window_rules(
       other_window.clone().into(),
       &WindowRuleEvent::Manage,
@@ -1032,8 +1041,8 @@ workspaces:
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
 
     let result = run_window_rules(
       window.clone().into(),
@@ -1145,8 +1154,8 @@ workspaces:
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
     let initial_area_ids = side_area_ids(&selected_monitor);
 
     let result = run_window_rules(
@@ -1269,8 +1278,8 @@ workspaces:
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
     let initial_area_ids = side_area_ids(&selected_monitor);
 
     let result = run_window_rules(
@@ -1407,8 +1416,8 @@ workspaces:
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
 
-    ensure_side_areas(&selected_monitor, &state, &config).unwrap();
-    ensure_side_areas(&other_monitor, &state, &config).unwrap();
+    ensure_side_areas(&selected_monitor, &mut state, &config).unwrap();
+    ensure_side_areas(&other_monitor, &mut state, &config).unwrap();
     let initial_area_ids = side_area_ids(&selected_monitor);
 
     let result = run_window_rules(
@@ -1519,7 +1528,7 @@ workspaces:
     ))
     .unwrap();
     let mut config = UserConfig::mock_with_value(parsed_config);
-    ensure_side_areas(&monitor, &state, &config).unwrap();
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
 
     run_window_rules(
       subject.clone().into(),
@@ -1583,5 +1592,62 @@ workspaces:
       assert_subject_workspace_config_target(side, true);
       assert_subject_workspace_config_target(side, false);
     }
+  }
+
+  #[test]
+  fn hidden_sidebar_defers_automatic_rules_until_explicit_recovery() {
+    let window = TilingWindow::mock()
+      .process_name("widget".to_string())
+      .call();
+    let area = Workspace::mock_side_area()
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let regular = Workspace::mock().name("1".to_string()).call();
+    let monitor = Monitor::mock()
+      .workspaces(vec![area.clone(), regular.clone()])
+      .call();
+    let mut state =
+      crate::test_utils::state_with_monitors(vec![monitor.clone()]);
+    let parsed_config = serde_yaml::from_str(
+      r"
+window_rules:
+  - commands: ['move --workspace 1']
+    on: ['manage', 'focus', 'title_change']
+    match:
+      - window_process: { equals: widget }
+workspaces:
+  - name: '1'
+",
+    )
+    .unwrap();
+    let mut config = UserConfig::mock_with_value(parsed_config);
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
+    for event in [
+      WindowRuleEvent::Manage,
+      WindowRuleEvent::Focus,
+      WindowRuleEvent::TitleChange,
+    ] {
+      run_window_rules(
+        window.clone().into(),
+        &event,
+        &mut state,
+        &mut config,
+      )
+      .unwrap();
+      assert_eq!(window.workspace().unwrap().id(), area.id());
+      assert!(!area.is_displayed());
+      assert_eq!(window.done_window_rules().len(), 0);
+    }
+    let command: InvokeCommand =
+      serde_yaml::from_str("move --workspace 1").unwrap();
+    WindowManager::run_command(
+      &command,
+      window.clone().into(),
+      &mut state,
+      &mut config,
+    )
+    .unwrap();
+    assert_eq!(window.workspace().unwrap().id(), regular.id());
+    assert!(regular.is_displayed());
   }
 }

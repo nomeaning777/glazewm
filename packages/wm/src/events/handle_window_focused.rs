@@ -20,6 +20,21 @@ pub fn handle_window_focused(
   config: &mut UserConfig,
 ) -> anyhow::Result<()> {
   let found_window = state.window_from_native(native_window);
+  // Applications can request focus while their sidebar is unavailable.
+  if let Some(window) = &found_window {
+    if window
+      .workspace()
+      .is_some_and(|area| area.is_hidden_side_area())
+    {
+      state.is_focus_synced = false;
+      state
+        .pending_sync
+        .queue_container_to_redraw(window.clone())
+        .queue_focus_change();
+      return Ok(());
+    }
+  }
+
   let focused_container =
     state.focused_container().context("No focused container.")?;
 
@@ -113,4 +128,41 @@ fn should_override_focus(state: &WmState) -> bool {
     .is_some_and(|time| time.elapsed().as_millis() < 100);
 
   has_recent_unmanage && !state.is_focus_synced
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{
+    commands::monitor::ensure_side_areas,
+    models::{Monitor, TilingWindow, Workspace},
+    test_utils::state_with_monitors,
+  };
+
+  #[test]
+  fn native_focus_cannot_reveal_a_disappeared_sidebar() {
+    let window = TilingWindow::mock().call();
+    let area = Workspace::mock_side_area()
+      .tiling_containers(vec![window.clone().into()])
+      .call();
+    let regular = Workspace::mock().call();
+    let monitor = Monitor::mock()
+      .workspaces(vec![area.clone(), regular.clone()])
+      .call();
+    let mut state = state_with_monitors(vec![monitor.clone()]);
+    let mut config = UserConfig::mock();
+    ensure_side_areas(&monitor, &mut state, &config).unwrap();
+    state.pending_sync.clear();
+    state.is_focus_synced = true;
+    window.set_display_state(DisplayState::Hidden);
+
+    handle_window_focused(&window.native(), &mut state, &mut config)
+      .unwrap();
+
+    assert!(!area.is_displayed());
+    assert_eq!(state.focused_container().unwrap().id(), regular.id());
+    assert!(!state.is_focus_synced);
+    assert!(state.pending_sync.needs_focus_update());
+    assert!(state.windows_to_redraw().contains(&window.into()));
+  }
 }
